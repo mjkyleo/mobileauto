@@ -464,6 +464,14 @@ class WorkbenchApi:
                 states.append({"name": state_name, "match": match, "action": "click_match", "label": raw_name})
             elif action == "back":
                 states.append({"name": state_name, "match": [raw_name or "返回键"], "action": "back", "label": raw_name})
+            elif action == "scroll":
+                states.append({
+                    "name": state_name,
+                    "match": [raw_name or "滚动"],
+                    "action": "scroll",
+                    "direction": step.get("direction") or "down",
+                    "label": raw_name,
+                })
             elif action == "wait":
                 texts = [t for t in (step.get("texts") or []) if t]
                 states.append({
@@ -524,6 +532,37 @@ class WorkbenchApi:
             activity.record_step("back", "返回键", "back")
         except Exception as e:
             self.log(f"返回失败：{e}")
+
+    def scroll_page(self, direction="down", record=True):
+        """按屏幕比例上下滚动：向上=从下往上划，向下=从上往下划。"""
+        if self.conn is None:
+            return False
+        with self._lock:
+            size = self.screen_size
+        w, h = (size or [1440, 3200])[:2]
+        direction = "up" if str(direction).lower() == "up" else "down"
+        cx = int(w / 2)
+        if direction == "up":
+            y1, y2 = int(h * 0.75), int(h * 0.3)
+        else:
+            y1, y2 = int(h * 0.3), int(h * 0.75)
+        self.log(f"页面滚动：{direction}")
+        self._spawn(self._scroll_worker, cx, y1, cx, y2, bool(record), direction)
+        return True
+
+    def _scroll_worker(self, x1, y1, x2, y2, record=True, direction="down"):
+        try:
+            from mobileauto import inspector, activity
+
+            inspector.swipe(self.conn, x1, y1, x2, y2)
+            activity.log_action("scroll", f"页面滚动 {direction}")
+            if record:
+                activity.record_step(
+                    "scroll", f"滚动 {direction}", direction,
+                    {"action": "scroll", "direction": direction},
+                )
+        except Exception as e:
+            self.log(f"滚动失败：{e}")
 
     def press_home(self):
         if self.conn is None:
@@ -722,6 +761,14 @@ class WorkbenchApi:
         from mobileauto import stream
 
         return stream.get_stream_status()
+
+    def set_stream_quality(self, clear=True):
+        """关闭按钮识别时切到高清低延迟模式；开启识别时回到普通帧率。"""
+        from mobileauto import stream
+
+        state = stream.set_quality(clear)
+        self.log("画面模式：高清低延迟" if state else "画面模式：按钮识别")
+        return {"ok": True, "clear": state}
 
     # ---------- 任务列表 ----------
     def list_tasks(self):

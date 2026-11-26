@@ -13,7 +13,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from mobileauto.paths import APP_DIR
 
 STREAM_PORT = 8765
-FRAME_INTERVAL = 0.08  # 约 12fps
+FRAME_INTERVAL = 0.08  # 识别模式：约 12fps
+# 纯净模式（关闭按钮识别）：最高画质 + 最低延迟
+CLEAR_INTERVAL = 0.02   # 约 50fps
+CLEAR_JPEG_QUALITY = 98
+DETECT_JPEG_QUALITY = 88
 
 
 def _blank_frame():
@@ -22,7 +26,7 @@ def _blank_frame():
         import cv2
         import numpy as np
 
-        img = np.full((720, 405, 3), 20, dtype=np.uint8)
+        img = np.zeros((720, 405, 3), dtype=np.uint8)
         ok, buf = cv2.imencode(".jpg", img)
         return buf.tobytes() if ok else None
     except Exception:
@@ -40,6 +44,11 @@ class FrameSource:
         self._running = False
         self._server = None
         self._conn = None  # 工作台已连接的 inspector conn
+        self.clear_mode = False  # True=关闭识别的纯净高清低延迟模式
+        self.frame_interval = FRAME_INTERVAL
+        self.jpeg_quality = DETECT_JPEG_QUALITY
+        self.no_device = False  # 显式断开后为 True，保持黑屏不再抓帧
+        self.ever_connected = False
 
     def start(self):
         with self.lock:
@@ -56,11 +65,28 @@ class FrameSource:
             self._server.shutdown()
 
     def attach_conn(self, conn):
-        """由工作台注入已连接设备，画面优先复用它，不必再找 adb。"""
+        """由工作台注入已连接设备；断开时立即清成黑屏并停止抓帧。"""
         with self.lock:
             self._conn = conn
-        if conn is not None:
-            self.set_status(f"画面采集中（{conn.get('mode', 'device')}）")
+            if conn is None:
+                # 只有曾经连上过才算「主动断开」，首次启动仍允许 scrcpy 兜底
+                if self.ever_connected:
+                    self.no_device = True
+                    self.latest = _blank_frame()
+                    self.status = "设备已断开"
+            else:
+                self.ever_connected = True
+                self.no_device = False
+                self.status = f"画面采集中（{conn.get('mode', 'device')}）"
+
+    def set_quality(self, clear=True):
+        """切换画质模式。clear=True：关闭识别，最高清最低延迟。"""
+        with self.lock:
+            self.clear_mode = bool(clear)
+            self.frame_interval = CLEAR_INTERVAL if self.clear_mode else FRAME_INTERVAL
+            self.jpeg_quality = CLEAR_JPEG_QUALITY if self.clear_mode else DETECT_JPEG_QUALITY
+            self.status = "高清画面（低延迟）" if self.clear_mode else "画面采集中"
+        return self.clear_mode
 
     def set_status(self, text):
         with self.lock:
@@ -85,14 +111,21 @@ class FrameSource:
 
     async def _capture(self):
         while self._running:
-            # 1) 优先复用工作台已连接的设备
+            # 断开后保持黑屏，不再尝试任何抓帧
             with self.lock:
                 conn = self._conn
+                no_device = self.no_device
+            if no_device and conn is None:
+                await asyncio.sleep(0.5)
+                continue
+
+            # 1) 优先复用工作台已连接的设备
             if conn is not None:
                 ok = await self._grab_conn(conn)
                 if ok:
                     continue
                 self.attach_conn(None)
+                continue
 
             # 2) 退化到 scrcpy 帧流（若可用）
             ok = await self._grab_scrcpy()
@@ -126,10 +159,14 @@ class FrameSource:
                 return False
             import cv2
 
-            ok, buf = cv2.imencode(".jpg", img)
+            with self.lock:
+                quality = self.jpeg_quality
+            ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
             if ok:
                 with self.lock:
                     self.latest = buf.tobytes()
+                    interval = self.frame_interval
+                await asyncio.sleep(interval)
             return True
         except Exception:
             return False
@@ -155,11 +192,14 @@ class FrameSource:
                 with self.lock:
                     if self._conn is not None:
                         return True
-                jpg = await device.get_screenshot_jpg(quality=80)
+                with self.lock:
+                    quality = self.jpeg_quality
+                    interval = self.frame_interval
+                jpg = await device.get_screenshot_jpg(quality=quality)
                 if jpg:
                     with self.lock:
                         self.latest = jpg
-                await asyncio.sleep(FRAME_INTERVAL)
+                await asyncio.sleep(interval)
             return True
         except Exception:
             return False
@@ -198,7 +238,9 @@ class FrameSource:
                         )
                         self.wfile.write(head + jpg + b"\r\n")
                         self.wfile.flush()
-                        time.sleep(FRAME_INTERVAL)
+                        with source.lock:
+                            interval = source.frame_interval
+                        time.sleep(interval)
                 except Exception:
                     pass
 
@@ -215,7 +257,7 @@ class FrameSource:
                     except Exception:
                         pass
 
-            def log_message(self, *args):
+            def log_message(self, format, *args):
                 pass
 
         try:
@@ -227,12 +269,15 @@ class FrameSource:
 
 
 _stream = None
+_clear_mode = False
 
 
 def start_stream(port=STREAM_PORT):
     global _stream
     if _stream is None:
         _stream = FrameSource(port)
+        if _clear_mode:
+            _stream.set_quality(True)
         _stream.start()
     return _stream
 
@@ -246,6 +291,15 @@ def attach_conn(conn):
 def set_status(text):
     if _stream is not None:
         _stream.set_status(text)
+
+
+def set_quality(clear=True):
+    """切换画面质量模式；流未启动时记录状态，启动后生效。"""
+    global _clear_mode
+    _clear_mode = bool(clear)
+    if _stream is not None:
+        return _stream.set_quality(clear)
+    return _clear_mode
 
 
 def get_stream_status():

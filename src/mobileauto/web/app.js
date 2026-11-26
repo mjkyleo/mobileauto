@@ -9,6 +9,7 @@ let recordFilter = "all";
 let tasksCache = [];
 let recordingDraft = [];
 let selectingPoint = false;
+let selectButtonMode = false;
 
 // 可选能力清单（与 flow_engine.DEFAULT_CAPABILITIES 对齐）
 const CAPABILITIES = [
@@ -64,6 +65,7 @@ function syncCapsFromJson() {
 window.addEventListener("pywebviewready", async () => {
   api = window.pywebview.api;
   bindEvents();
+  await call("set_stream_quality", !$("#showElements").checked);
   await poll();
   await loadTaskSelect();
   await loadExecution();
@@ -121,9 +123,16 @@ function bindEvents() {
     await call("disconnect");
     await poll();
   });
+  $("#scrollUpBtn").addEventListener("click", () => call("scroll_page", "up"));
+  $("#scrollDownBtn").addEventListener("click", () => call("scroll_page", "down"));
   $("#backBtn").addEventListener("click", () => call("press_back"));
   $("#homeBtn").addEventListener("click", () => call("press_home"));
   $("#recentsBtn").addEventListener("click", () => call("press_recents"));
+  $("#showElements").addEventListener("change", async () => {
+    await call("set_stream_quality", !$("#showElements").checked);
+    renderFromState();
+    await poll();
+  });
   [$("#filterInput"), $("#hideSystem")].forEach((node) => {
     node.addEventListener("input", renderFromState);
     node.addEventListener("change", renderFromState);
@@ -159,6 +168,7 @@ function bindEvents() {
     await loadRecording();
   });
   $("#selectPointBtn").addEventListener("click", toggleSelecting);
+  $("#selectButtonBtn").addEventListener("click", toggleSelectButton);
   $("#foldLoopBtn").addEventListener("click", async () => {
     const result = await call("fold_recording_loops");
     $("#recordStatus").textContent = result && result.changed
@@ -310,21 +320,37 @@ function filteredRows() {
 function renderFromState() {
   if (!state) return;
   const rows = filteredRows();
-  $("#elementCount").textContent = `${rows.length} 个可点击元素`;
+  if ($("#elementCount")) $("#elementCount").textContent = `${rows.length} 个可点击元素`;
+  const phone = $("#phone");
+  if (phone) phone.classList.toggle("hide-elements", !$("#showElements").checked);
   renderList(rows);
   renderPhone(rows);
 }
 
 function renderList(rows) {
   const list = $("#buttonList");
+  if (!list) return; // 按钮点击已集成到实时画面，独立的按钮面板已取消
   list.innerHTML = "";
+  const screen = state && state.screen;
+  const sw = screen && screen[0] ? Number(screen[0]) : 0;
+  const sh = screen && screen[1] ? Number(screen[1]) : 0;
+
   rows.slice(0, 400).forEach((row) => {
     const name = row.text || row.desc || (row.resource_id || "").split("/").pop() || "未命名按钮";
     const btn = document.createElement("button");
     btn.className = "click-btn" + (Number(row.index) === Number(selectedIndex) ? " selected" : "");
     btn.dataset.index = row.index;
-    btn.textContent = name;
     btn.title = `点击「${name}」`;
+    // 按手机屏幕真实坐标定位，和画面里的红框一一对应
+    if (sw && sh && row.cx !== undefined && row.cy !== undefined) {
+      btn.style.left = `${(Number(row.cx) / sw) * 100}%`;
+      btn.style.top = `${(Number(row.cy) / sh) * 100}%`;
+      btn.textContent = name.slice(0, 8);
+    } else {
+      btn.style.left = "50%";
+      btn.style.top = "50%";
+      btn.textContent = name.slice(0, 8);
+    }
     btn.addEventListener("click", () => {
       selectedIndex = row.index;
       renderFromState();
@@ -363,13 +389,14 @@ function renderPhone(rows) {
       div.appendChild(span);
     }
     div.title = `${label}\n(${row.cx}, ${row.cy})`;
-    div.addEventListener("click", (event) => {
+    div.addEventListener("click", async (event) => {
       event.stopPropagation();
-      selectRow(row.index);
-    });
-    div.addEventListener("dblclick", (event) => {
-      event.stopPropagation();
-      confirmClick(row);
+      if (selectButtonMode) {
+        await recordPickedButton(row);
+      } else {
+        selectedIndex = row.index;
+        confirmClick(row);
+      }
     });
     phone.appendChild(div);
   });
@@ -385,9 +412,44 @@ function guessScreen(rows) {
   return [w, h];
 }
 
+// ---------- 选择已识别按钮作为录制步骤 ----------
+function toggleSelectButton() {
+  selectButtonMode = !selectButtonMode;
+  if (selectButtonMode) {
+    selectingPoint = false;
+    const overlay = $("#selectOverlay");
+    overlay.classList.add("hidden");
+    overlay.innerHTML = "";
+    $("#selectPointBtn").classList.remove("primary");
+    $("#selectPointBtn").textContent = "选点/框选";
+  }
+  $("#phone").classList.toggle("select-button", selectButtonMode);
+  const btn = $("#selectButtonBtn");
+  btn.classList.toggle("primary", selectButtonMode);
+  btn.textContent = selectButtonMode ? "退出选择" : "选择按钮";
+}
+
+async function recordPickedButton(row) {
+  const name = row.text || row.desc || (row.resource_id || "").split("/").pop() || "未命名按钮";
+  const screen = state.screen || guessScreen([row]);
+  const sw = screen && screen[0] ? Number(screen[0]) : 1440;
+  const sh = screen && screen[1] ? Number(screen[1]) : 3200;
+  const cx = row.cx !== undefined ? Number(row.cx) : (Number(row.x1) + Number(row.x2)) / 2;
+  const cy = row.cy !== undefined ? Number(row.cy) : (Number(row.y1) + Number(row.y2)) / 2;
+  await call("add_manual_click", Math.round(cx), Math.round(cy), name);
+  await loadRecording();
+  poll();
+}
+
 // ---------- 画面选点 / 框选 ----------
 function toggleSelecting() {
   selectingPoint = !selectingPoint;
+  if (selectingPoint && selectButtonMode) {
+    selectButtonMode = false;
+    $("#phone").classList.remove("select-button");
+    $("#selectButtonBtn").classList.remove("primary");
+    $("#selectButtonBtn").textContent = "选择按钮";
+  }
   const overlay = $("#selectOverlay");
   overlay.classList.toggle("hidden", !selectingPoint);
   overlay.innerHTML = "";
@@ -399,6 +461,9 @@ function toggleSelecting() {
     hint.className = "select-hint";
     hint.textContent = "单击=点击该点，拖拽=框选区域中心";
     overlay.appendChild(hint);
+    setTimeout(() => {
+      if (hint.parentNode) hint.remove();
+    }, 2600);
   }
 }
 
@@ -956,7 +1021,8 @@ function renderCapture(result) {
 // ---------- 行为录制 ----------
 const ACTION_OPTIONS = [
   ["click_ratio", "点击坐标"], ["click_match", "点击文字"], ["back", "返回键"],
-  ["wait", "等待"], ["finish", "结束"], ["mute_once", "静音一次"], ["close_ad", "关广告"],
+  ["scroll", "页面滚动"], ["wait", "等待"], ["finish", "结束"],
+  ["mute_once", "静音一次"], ["close_ad", "关广告"],
 ];
 
 async function loadRecording() {
@@ -993,6 +1059,7 @@ async function loadRecording() {
     detail.addEventListener("blur", async () => {
       recordingDraft[i].label = detail.value;
       await persistDraft();
+      releaseEditing();
     });
     row.appendChild(detail);
 
@@ -1005,9 +1072,13 @@ async function loadRecording() {
       action.appendChild(opt);
     });
     action.value = item.action || "wait";
+    action.addEventListener("focus", () => { box.dataset.editing = "1"; });
     action.addEventListener("change", async () => {
       recordingDraft[i].action = action.value;
       await persistDraft();
+    });
+    action.addEventListener("blur", async () => {
+      releaseEditing();
       await loadRecording();
     });
     row.appendChild(action);
@@ -1033,6 +1104,7 @@ async function loadRecording() {
           cur[idx] = Number(input.value);
           recordingDraft[i].ratio = cur;
           await persistDraft();
+          releaseEditing();
         });
         ratioWrap.appendChild(input);
       });
@@ -1064,8 +1136,10 @@ async function loadRecording() {
 }
 
 async function persistDraft() {
-  const box = $("#activityList");
-  if (box) box.dataset.editing = "1";
   await call("save_recording_draft", recordingDraft);
+}
+
+function releaseEditing() {
+  const box = $("#activityList");
   if (box) delete box.dataset.editing;
 }

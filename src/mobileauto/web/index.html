@@ -76,21 +76,21 @@
                 </div>
               </div>
               <div class="phone-nav" title="安卓系统按键">
+                <button id="scrollUpBtn" class="nav-key arrow" title="向上滚动">↑</button>
                 <button id="backBtn" class="nav-key" title="返回">返回</button>
                 <button id="homeBtn" class="nav-key" title="主页">主页</button>
                 <button id="recentsBtn" class="nav-key" title="最近任务">最近</button>
+                <button id="scrollDownBtn" class="nav-key arrow" title="向下滚动">↓</button>
               </div>
-              <div class="legend"><i></i>红框 = 可点击按钮 · 点「选点」后可在画面上人工定位</div>
+              <div class="legend">
+                <label class="check"><input id="showElements" type="checkbox" checked /> 显示按钮识别</label>
+                <span>红框 = 可点击按钮 · 单击执行，录制时可选为步骤</span>
+              </div>
 
               <div class="collect-inline">
                 <button id="collectBtn" class="btn tiny primary">采集当前页面</button>
                 <div id="captureResult" class="capture-result"></div>
               </div>
-            </div>
-
-            <div class="panel execution-panel" id="executionPanel">
-              <div class="panel-title">执行过程 <span class="hint-inline">最近 5 步</span></div>
-              <div id="executionList" class="execution-list"></div>
             </div>
           </div>
 
@@ -99,18 +99,21 @@
               <div class="panel-title">行为录制 <span class="hint-inline" id="recordStatus">未录制</span></div>
               <div class="record-bar">
                 <button id="recordToggleBtn" class="btn tiny primary">开始录制</button>
+                <button id="selectButtonBtn" class="btn tiny">选择按钮</button>
                 <button id="selectPointBtn" class="btn tiny">选点/框选</button>
                 <button id="foldLoopBtn" class="btn tiny">折叠循环</button>
                 <button id="clearActivityBtn" class="btn tiny ghost">清空</button>
                 <button id="recordToTaskBtn" class="btn tiny">转成任务</button>
               </div>
-              <div class="record-guide">开启录制后，点击按钮、采集页面、按系统键都会记为一步；按钮识别不到时，点「选点/框选」在实时画面上直接选位置。步骤可改名、改动作、改坐标、排序。</div>
+              <div class="record-guide">开启录制后，点击按钮、采集页面、按系统键都会记为一步；点「选择按钮」后可在实时画面上直接挑选已识别的按钮作为步骤，识别不到时用「选点/框选」人工定位。</div>
               <div id="activityList" class="activity-list"></div>
             </div>
 
-            <div class="panel element-panel">
-              <div class="panel-title">可点击按钮</div>
-              <div id="buttonList" class="button-list"></div>
+            <div class="right-bottom">
+              <div class="panel execution-panel" id="executionPanel">
+                <div class="panel-title">执行过程 <span class="hint-inline">最近 5 步</span></div>
+                <div id="executionList" class="execution-list"></div>
+              </div>
             </div>
           </div>
         </div>

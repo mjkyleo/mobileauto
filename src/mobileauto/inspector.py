@@ -226,6 +226,19 @@ def click_at(conn, x, y):
         )
 
 
+def swipe(conn, x1, y1, x2, y2, duration=300):
+    """屏幕滑动，duration 毫秒。用于页面上下滚动。"""
+    if conn["mode"] == "u2":
+        conn["client"].swipe(int(x1), int(y1), int(x2), int(y2), duration=duration)
+    else:
+        subprocess.run(
+            [conn["client"], "shell", "input", "swipe", str(int(x1)), str(int(y1)),
+             str(int(x2)), str(int(y2)), str(int(duration))],
+            capture_output=True,
+            text=True,
+        )
+
+
 def press_back(conn):
     if conn["mode"] == "u2":
         conn["client"].press("back")

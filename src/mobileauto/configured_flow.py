@@ -163,6 +163,12 @@ def make_handle(states, finish_keywords=None):
             engine.verify_action(state_now, "返回键")
             return
 
+        if action == "scroll":
+            direction = cfg.get("direction") or "down"
+            engine.device.scroll_page(direction, record=False)
+            engine.log_action(f"页面滚动 {direction}")
+            return
+
         if action == "click_ratio":
             ratio = cfg.get("ratio") or []
             if len(ratio) == 2 and engine.tap_ratio(ratio[0], ratio[1], cfg.get("label") or state_now):
