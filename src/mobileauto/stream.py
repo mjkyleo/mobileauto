@@ -1,8 +1,7 @@
-"""实时画面流：优先使用 scrcpy(H264) 解码帧，失败回退设备截图，本地 MJPEG 推送。
+"""实时画面：优先 scrcpy v5 H264 + WebSocket，失败回退快速截图/MJPEG。
 
-scrcpy 服务端在手机上编码视频，客户端只解码最新帧；相比反复执行 screencap
-或 u2.screenshot，帧率更稳定、延迟更低。控制事件走同一条 scrcpy 通道，点击
-无需每次拉起新的 adb 进程。
+scrcpy 服务端在手机上用 VirtualDisplay + MediaCodec 硬编 H264，PC 端只做包转发，
+浏览器用 WebCodecs 硬解并只渲染最新帧；相比逐帧截图/JPEG，延迟和流畅度都更好。
 """
 
 import asyncio
@@ -13,36 +12,17 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from mobileauto.paths import APP_DIR
+from mobileauto.scrcpy_stream import WS_PORT, ScrcpyStream
 
 STREAM_PORT = 8765
-FRAME_INTERVAL = 0.04  # 按钮识别模式：约 25fps
-CLEAR_INTERVAL = 0.02  # 纯净模式：约 50fps（scrcpy 只在画面变化时产生新帧）
+FRAME_INTERVAL = 0.04
+CLEAR_INTERVAL = 0.02
 CLEAR_JPEG_QUALITY = 98
 DETECT_JPEG_QUALITY = 88
-SCRCPY_RETRY_SECONDS = 3.0
-_scrcpy_audio_patched = False
-_scrcpy_fps_set = False
-
-
-def _patch_scrcpy_no_audio():
-    """让 adb-scr-py 以 audio=false 启动服务，避免 Android 17 音频捕获报错。"""
-    global _scrcpy_audio_patched
-    if _scrcpy_audio_patched:
-        return
-    try:
-        from adb_scr.device import android_device as device_module
-
-        async def _no_audio_api_level(serial, timeout=5.0):
-            return 29
-
-        device_module.adb_android_api_level = _no_audio_api_level
-        _scrcpy_audio_patched = True
-    except Exception:
-        pass
+SCRCPY_RETRY_SECONDS = 6.0
 
 
 def _blank_frame():
-    """纯色占位帧，不写文字，避免 cv2 中文乱码。"""
     try:
         import cv2
         import numpy as np
@@ -55,29 +35,29 @@ def _blank_frame():
 
 
 class FrameSource:
-    """后台抓帧 + 本地 MJPEG 服务。"""
+    """后台抓帧 + 本地 MJPEG/WebSocket 服务。"""
 
     def __init__(self, port=STREAM_PORT):
         self.port = port
         self.latest = _blank_frame()
         self.status = "等待设备"
+        self.last_error = ""
         self.lock = threading.RLock()
         self.frame_cond = threading.Condition(self.lock)
         self.frame_seq = 0
         self._running = False
         self._server = None
         self._loop = None
-        self._conn = None  # 工作台已连接的 inspector conn
-        self.clear_mode = False  # True=关闭识别的纯净高清低延迟模式
+        self._conn = None
+        self.clear_mode = False
         self.frame_interval = FRAME_INTERVAL
         self.jpeg_quality = DETECT_JPEG_QUALITY
-        self.no_device = False  # 显式断开后为 True，保持黑屏不再抓帧
+        self.no_device = False
         self.ever_connected = False
-        self._scrcpy_device = None
-        self._scrcpy_serial = ""
+        self._scrcpy = None
         self._scrcpy_retry_at = 0.0
         self._scrcpy_connect_task = None
-        self._scrcpy_disabled = False  # 设备不兼容时彻底停用，避免反复启动服务
+        self._scrcpy_disabled = False
 
     def start(self):
         with self.lock:
@@ -94,12 +74,14 @@ class FrameSource:
         if self._server:
             self._server.shutdown()
 
+    def _note(self, text):
+        self.last_error = str(text)[:300]
+
     def attach_conn(self, conn):
-        """由工作台注入已连接设备；断开时立即清成黑屏并停止抓帧。"""
+        """连接设备时注入 conn；断开时立即黑屏并关闭 H264 会话。"""
         with self.frame_cond:
             self._conn = conn
             if conn is None:
-                # 只有曾经连上过才算「主动断开」，首次启动仍允许 scrcpy 兜底
                 if self.ever_connected:
                     self.no_device = True
                     self.latest = _blank_frame()
@@ -109,10 +91,7 @@ class FrameSource:
             else:
                 self.ever_connected = True
                 self.no_device = False
-                self.status = (
-                    "画面采集中（兼容抓帧）" if self._scrcpy_disabled
-                    else "画面采集中（正在启动 H264 视频）"
-                )
+                self.status = "画面采集中（正在启动 H264）"
         if conn is None:
             task = self._scrcpy_connect_task
             if task is not None:
@@ -121,7 +100,6 @@ class FrameSource:
             self.request_close_scrcpy()
 
     def set_quality(self, clear=True):
-        """切换画质模式。clear=True：关闭识别，最高清最低延迟。"""
         with self.lock:
             self.clear_mode = bool(clear)
             self.frame_interval = CLEAR_INTERVAL if self.clear_mode else FRAME_INTERVAL
@@ -136,55 +114,33 @@ class FrameSource:
 
     def get_status(self):
         with self.lock:
+            h264 = bool(self._scrcpy and self._scrcpy.running and self._scrcpy.has_frame)
             return {
                 "status": self.status,
                 "port": self.port,
-                "has_frame": self.latest is not None,
+                "has_frame": self.latest is not None or h264,
                 "url": f"http://127.0.0.1:{self.port}/stream",
+                "ws_url": f"ws://127.0.0.1:{WS_PORT}",
+                "h264": h264,
+                "last_error": self.last_error,
             }
 
-    # ---------- 控制通道（scrcpy 输入注入） ----------
+    # ---------- 控制通道 ----------
     def has_control(self):
-        dev = self._scrcpy_device
-        return bool(dev is not None and dev.is_connected)
+        return bool(self._scrcpy and self._scrcpy.has_control())
 
     def get_control_size(self):
-        dev = self._scrcpy_device
-        if dev is None or not dev.is_connected:
-            return None
-        try:
-            return dev.get_screen_size()
-        except Exception:
-            return None
+        return self._scrcpy.get_screen_size() if self._scrcpy else None
 
     def tap(self, x, y, timeout=2.0):
-        """通过 scrcpy 控制通道点击；未建通道时返回 False 交给兼容实现。"""
-        dev = self._scrcpy_device
-        if dev is None or not dev.is_connected:
+        if not self.has_control():
             return False
-        return self._run_control(dev.click, int(x), int(y), timeout=timeout)
+        return bool(self._scrcpy.tap(x, y))
 
     def swipe(self, x1, y1, x2, y2, timeout=4.0):
-        """通过 scrcpy 控制通道滑动，带插帧，比 input swipe 更顺滑。"""
-        dev = self._scrcpy_device
-        if dev is None or not dev.is_connected:
+        if not self.has_control():
             return False
-        return self._run_control(
-            dev.swipe,
-            int(x1), int(y1), int(x2), int(y2),
-            timeout=timeout,
-        )
-
-    def _run_control(self, func, *args, timeout=2.0):
-        loop = self._loop
-        if loop is None or loop.is_closed():
-            return False
-        try:
-            future = asyncio.run_coroutine_threadsafe(func(*args), loop)
-            future.result(timeout=timeout)
-            return True
-        except Exception:
-            return False
+        return bool(self._scrcpy.swipe(x1, y1, x2, y2))
 
     # ---------- 抓帧循环 ----------
     def _capture_loop(self):
@@ -206,35 +162,32 @@ class FrameSource:
                 await asyncio.sleep(0.5)
                 continue
 
+            # H264 帧由 ScrcpyStream 直接推给浏览器，不占用截图循环
+            if self._scrcpy and self._scrcpy.running and self._scrcpy.has_frame:
+                with self.lock:
+                    interval = self.frame_interval
+                await asyncio.sleep(interval)
+                continue
+
+            self._maybe_start_scrcpy(conn)
             got_frame = False
-
-            # 1) scrcpy 连接放到后台任务，连接期间不阻塞截图，避免卡顿
-            dev = self._scrcpy_device
-            if not self._scrcpy_disabled:
-                if dev is not None and dev.is_connected:
-                    got_frame = await self._grab_scrcpy_frame()
-                    dev = self._scrcpy_device
-                    # Android 17 上内置 scrcpy-server 会直接 Aborted；一旦会话断掉
-                    # 就永久停用 H264，只走兼容截图，不再反复启动服务。
-                    if not got_frame and (dev is None or not dev.is_connected):
-                        self._disable_scrcpy()
-                else:
-                    self._maybe_start_scrcpy(conn)
-
-            # 2) 兼容抓帧：scrcpy 未就绪、不可用时立即顶上
-            if not got_frame and conn is not None:
+            if conn is not None:
                 got_frame = await self._grab_conn(conn)
-                if not got_frame:
-                    self.attach_conn(None)
+            if not got_frame:
+                if self._scrcpy or self._scrcpy_connect_task is not None:
+                    await asyncio.sleep(0.1)
                     continue
+                self.attach_conn(None)
+                continue
 
             with self.lock:
                 interval = self.frame_interval
             await asyncio.sleep(interval if got_frame else (0.02 if conn else 0.8))
 
     def _maybe_start_scrcpy(self, conn):
-        """在抓帧后台任务里异步尝试 H264，不占用当前帧的采集时间。"""
         if self._scrcpy_disabled or self.no_device or self._scrcpy_connect_task is not None:
+            return
+        if self._scrcpy and self._scrcpy.running:
             return
         now = time.monotonic()
         if now < self._scrcpy_retry_at:
@@ -243,82 +196,40 @@ class FrameSource:
         loop = self._loop
         if loop is None or loop.is_closed():
             return
-        self._scrcpy_connect_task = loop.create_task(self._ensure_scrcpy(conn))
+        self._scrcpy_connect_task = loop.create_task(self._start_scrcpy(conn))
 
-    def _disable_scrcpy(self):
-        """标记 H264 不兼容，停止后续重连，永久回到快速兼容抓帧。"""
-        if self._scrcpy_disabled:
-            return
-        self._scrcpy_disabled = True
-        self._scrcpy_retry_at = float("inf")
-        self.set_status("画面采集中（H264 不兼容，兼容抓帧）")
-        self.request_close_scrcpy()
-
-    async def _ensure_scrcpy(self, conn):
-        """后台建立一条 scrcpy(H264) 会话；失败即永久停用，不阻塞抓帧。"""
-        global _scrcpy_fps_set
+    async def _start_scrcpy(self, conn):
+        stream = None
         try:
-            if self.no_device or self._scrcpy_disabled:
-                return False
-            dev = self._scrcpy_device
-            if dev is not None and dev.is_connected:
-                return True
-            from adb_scr import (
-                AndroidDevice, ConnectionOptions, adb_devices, init_lib, set_screen_record_fps,
-            )
             from mobileauto import inspector
 
-            _patch_scrcpy_no_audio()
             adb = inspector.find_adb()
-            if not adb:
-                self._disable_scrcpy()
-                return False
-            # 当前内置 scrcpy-server 在 Android 16/17 的 DisplaySizeMonitor 上会
-            # 抛 AbstractMethodError 并直接 Aborted，提前识别并跳过，避免反复启动。
-            import subprocess
-            api = await asyncio.to_thread(
-                lambda: subprocess.run(
-                    [adb, "shell", "getprop", "ro.build.version.sdk"],
-                    capture_output=True,
-                    timeout=5,
-                )
-            )
-            sdk = int("".join(c for c in api.stdout.decode("ascii", "ignore") if c.isdigit()) or 0)
-            if sdk >= 36:
-                self._disable_scrcpy()
-                return False
-            await init_lib(adb_path=adb)
-            if not _scrcpy_fps_set:
-                set_screen_record_fps(60)
-                _scrcpy_fps_set = True
-            serials = list(await adb_devices() or [])
+            serials = inspector.list_adb_devices(adb, refresh=True) if adb else []
             serial = self._pick_serial(conn, serials)
             if not serial:
-                self._disable_scrcpy()
-                return False
-            # 关闭主动 adb 探活，避免并发抓 UI 层级时误判掉线并反复重建会话
-            options = ConnectionOptions(probe_interval=None, io_timeout=10.0)
-            device = AndroidDevice(
-                serial, "tcp" if ":" in serial else "usb", options=options
-            )
-            if not await device.connect():
-                self._disable_scrcpy()
-                return False
-            self._scrcpy_device = device
-            self._scrcpy_serial = serial
-            self.set_status(
-                "高清画面（scrcpy H264）" if self.clear_mode else "画面采集中（scrcpy H264）"
-            )
-            return True
-        except Exception:
-            self._disable_scrcpy()
-            return False
+                self._disable_scrcpy("未找到可用于 H264 的设备序列号")
+                return
+            stream = ScrcpyStream(adb, serial, log=self._note)
+            ok = await stream.start()
+            if ok and self._running and not self.no_device:
+                self._scrcpy = stream
+                self.set_status("高清画面（scrcpy H264）" if self.clear_mode else "画面采集中（scrcpy H264）")
+                return
+            await stream.stop()
+            self._disable_scrcpy(self.last_error or "H264 会话启动失败")
+        except Exception as e:
+            self._note(e)
+            self._disable_scrcpy(str(e))
+            if stream is not None:
+                try:
+                    await stream.stop()
+                except Exception:
+                    pass
         finally:
             self._scrcpy_connect_task = None
 
     @staticmethod
     def _pick_serial(conn, serials):
-        """优先复用工作台当前设备；u2 的 7912 端口映射回 adb 的 5555。"""
         candidates = []
         label = str((conn or {}).get("label") or "").strip()
         if label and label not in ("自动检测", "自动"):
@@ -338,29 +249,21 @@ class FrameSource:
             return candidates[0]
         return None
 
-    async def _grab_scrcpy_frame(self):
-        dev = self._scrcpy_device
-        if dev is None or not dev.is_connected:
-            return False
-        try:
-            with self.lock:
-                quality = self.jpeg_quality
-            jpg = await dev.get_screenshot_jpg(quality=quality)
-            if not jpg:
-                return False
-            self._set_frame(jpg)
-            return True
-        except Exception:
-            return False
+    def _disable_scrcpy(self, reason=""):
+        if self._scrcpy_disabled:
+            return
+        self._scrcpy_disabled = True
+        self._scrcpy_retry_at = float("inf")
+        self.last_error = str(reason)[:300]
+        self.set_status("画面采集中（H264 不兼容，快速截图）")
+        self.request_close_scrcpy()
 
     async def _grab_conn(self, conn):
-        """兼容抓帧：u2 直接取设备 JPEG，adb 用 screencap 后二次编码。"""
+        """兼容抓帧：u2 直接取设备 JPEG，adb 用 screencap 后编码。"""
         try:
             with self.lock:
                 quality = self.jpeg_quality
             if conn.get("mode") == "u2":
-                # u2 内部本来就是先拿 JPEG 再解码，这里直接用原始 JPEG，
-                # 省掉 PIL/cv2 解码再编码，帧率和延迟都会明显改善。
                 try:
                     raw = await asyncio.to_thread(
                         conn["client"].jsonrpc.takeScreenshot, 1, quality
@@ -385,7 +288,6 @@ class FrameSource:
                 if result.returncode != 0 or not result.stdout:
                     return False
                 img = cv2.imdecode(np.frombuffer(result.stdout, np.uint8), cv2.IMREAD_COLOR)
-
             if img is None:
                 return False
             import cv2
@@ -404,27 +306,24 @@ class FrameSource:
             self.frame_cond.notify_all()
 
     async def _close_scrcpy(self):
-        dev = self._scrcpy_device
-        self._scrcpy_device = None
-        self._scrcpy_serial = ""
-        if dev is None:
-            return
-        try:
-            await dev.disconnect()
-        except Exception:
-            pass
+        stream = self._scrcpy
+        self._scrcpy = None
+        if stream is not None:
+            try:
+                await stream.stop()
+            except Exception:
+                pass
 
     def request_close_scrcpy(self):
-        """从任意线程请求关闭 scrcpy 会话（抓帧循环在同一事件循环上执行）。"""
         loop = self._loop
-        if loop is None or loop.is_closed() or self._scrcpy_device is None:
+        if loop is None or loop.is_closed() or self._scrcpy is None:
             return
         try:
             asyncio.run_coroutine_threadsafe(self._close_scrcpy(), loop)
         except Exception:
             pass
 
-    # ---------- 本地 HTTP 推流 ----------
+    # ---------- 本地 MJPEG（兼容回退） ----------
     def _http_loop(self):
         source = self
 
@@ -448,7 +347,6 @@ class FrameSource:
                 last_seq = -1
                 try:
                     while source._running:
-                        # 新帧到达立即推送；没有新帧时定时重发，维持浏览器连接
                         with source.frame_cond:
                             source.frame_cond.wait_for(
                                 lambda: source.frame_seq != last_seq or not source._running,
@@ -509,7 +407,6 @@ def start_stream(port=STREAM_PORT):
 
 
 def attach_conn(conn):
-    """工作台连接/断开设备时调用，让画面流复用同一连接。"""
     if _stream is not None:
         _stream.attach_conn(conn)
 
@@ -520,7 +417,6 @@ def set_status(text):
 
 
 def set_quality(clear=True):
-    """切换画面质量模式；流未启动时记录状态，启动后生效。"""
     global _clear_mode
     _clear_mode = bool(clear)
     if _stream is not None:
@@ -529,7 +425,7 @@ def set_quality(clear=True):
 
 
 def get_stream_status():
-    return _stream.get_status() if _stream else {"status": "未启动", "url": ""}
+    return _stream.get_status() if _stream else {"status": "未启动", "url": "", "h264": False}
 
 
 def has_control():

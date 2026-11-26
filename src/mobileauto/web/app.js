@@ -11,6 +11,11 @@ let recordingDraft = [];
 let selectingPoint = false;
 let selectButtonMode = false;
 let lastPhoneSignature = "";
+let videoSocket = null;
+let videoDecoder = null;
+let decoderDescription = null;
+let configuredDescription = null;
+let h264Active = false;
 
 // 可选能力清单（与 flow_engine.DEFAULT_CAPABILITIES 对齐）
 const CAPABILITIES = [
@@ -277,10 +282,115 @@ async function poll() {
   const stream = await call("get_stream_status");
   if (stream) {
     $("#streamStatus").textContent = stream.status || "画面未启动";
-    const img = $("#liveFrame");
-    if (stream.url && img.getAttribute("src") !== stream.url) img.src = stream.url;
+    const useH264 = !!stream.h264 && typeof window.VideoDecoder === "function";
+    if (useH264 !== h264Active || (useH264 && videoSocket && videoSocket.url !== stream.ws_url)) {
+      h264Active = useH264;
+      setVideoMode(useH264, stream.ws_url);
+    }
+    if (!useH264) {
+      const img = $("#liveFrame");
+      if (stream.url && img.getAttribute("src") !== stream.url) img.src = stream.url;
+    }
   }
 
+}
+
+function setVideoMode(useH264, wsUrl) {
+  const img = $("#liveFrame");
+  const canvas = $("#videoCanvas");
+  if (videoSocket) {
+    videoSocket.close();
+    videoSocket = null;
+  }
+  decoderDescription = null;
+  configuredDescription = null;
+  if (useH264 && wsUrl) {
+    img.classList.add("hidden");
+    canvas.classList.remove("hidden");
+    connectH264(wsUrl);
+  } else {
+    canvas.classList.add("hidden");
+    img.classList.remove("hidden");
+    if (videoDecoder) {
+      try { videoDecoder.close(); } catch (e) { /* 已关闭 */ }
+      videoDecoder = null;
+    }
+  }
+}
+
+function decoderCodecName(description) {
+  if (!description || description.length < 8) return "avc1.640028";
+  const len = (description[0] << 24) | (description[1] << 16) | (description[2] << 8) | description[3];
+  const sps = description.slice(4, 4 + len);
+  const hex = (n) => Number(n || 0).toString(16).padStart(2, "0");
+  return `avc1.${hex(sps[1])}${hex(sps[2])}${hex(sps[3])}`;
+}
+
+function ensureVideoDecoder() {
+  if (!decoderDescription || typeof window.VideoDecoder !== "function") return false;
+  if (!videoDecoder || videoDecoder.state === "closed") {
+    videoDecoder = new VideoDecoder({
+      output: (frame) => {
+        const canvas = $("#videoCanvas");
+        if (!canvas) { frame.close(); return; }
+        const ctx = canvas.getContext("2d");
+        const w = frame.displayWidth || frame.codedWidth;
+        const h = frame.displayHeight || frame.codedHeight;
+        if (canvas.width !== w || canvas.height !== h) {
+          canvas.width = w;
+          canvas.height = h;
+        }
+        ctx.drawImage(frame, 0, 0, w, h);
+        frame.close();
+      },
+      error: (e) => {
+        console.error("VideoDecoder", e);
+        h264Active = false;
+        setVideoMode(false, null);
+      },
+    });
+  }
+  if (videoDecoder.state === "configured") return true;
+  if (configuredDescription === decoderDescription) return false;
+  try {
+    videoDecoder.configure({
+      codec: decoderCodecName(decoderDescription),
+      description: decoderDescription,
+      hardwareAcceleration: "prefer-hardware",
+      optimizeForLatency: true,
+    });
+    configuredDescription = decoderDescription;
+    return true;
+  } catch (e) {
+    console.error("VideoDecoder configure", e);
+    return false;
+  }
+}
+
+function connectH264(wsUrl) {
+  if (videoSocket && videoSocket.url === wsUrl &&
+      (videoSocket.readyState === WebSocket.OPEN || videoSocket.readyState === WebSocket.CONNECTING)) return;
+  if (videoSocket) videoSocket.close();
+  const ws = new WebSocket(wsUrl);
+  ws.binaryType = "arraybuffer";
+  videoSocket = ws;
+  ws.onmessage = (event) => {
+    const data = new Uint8Array(event.data);
+    if (!data.length) return;
+    if (data[0] === 0) {
+      decoderDescription = data.slice(1);
+      ensureVideoDecoder();
+    } else if (data[0] === 1 && ensureVideoDecoder()) {
+      try {
+        videoDecoder.decode(new EncodedVideoChunk({
+          type: data[1] ? "key" : "delta",
+          timestamp: performance.now() * 1000,
+          data: data.slice(2),
+        }));
+      } catch (e) { /* 丢掉这一帧，下一帧继续 */ }
+    }
+  };
+  ws.onerror = () => { /* WebSocket 断开后下一轮 poll 会重建 */ };
 }
 
 function updateStatus() {

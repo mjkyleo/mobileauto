@@ -18,6 +18,7 @@ cred_input.txt
 check_cred.cmd
 gh_api.py
 .tmp_pack/
+.scrcpy-ref/
 *.mmd
 mermaid_preview.html
 mermaid_verify.html

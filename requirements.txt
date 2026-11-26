@@ -4,3 +4,4 @@ rapidocr-onnxruntime
 uiautomator2
 pywebview>=5.0
 adb-scr-py>=0.4
+websockets>=12.0
