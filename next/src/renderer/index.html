@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' ws://127.0.0.1:* data: blob:; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:" />
+  <title>手机自动化工作台</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div id="app">
+  <aside class="sidebar">
+    <div class="brand"><span class="logo">MA</span><div><strong>手机自动化</strong><small>scrcpy 驱动工作台</small></div></div>
+    <nav>
+      <button class="nav active" data-page="device">设备工作台</button>
+      <button class="nav" data-page="tasks">任务列表</button>
+      <button class="nav" data-page="analysis">回放分析</button>
+      <button class="nav" data-page="records">记录文件</button>
+    </nav>
+    <div class="device-card">
+      <h3>设备连接</h3>
+      <div class="status-row"><span class="dot" id="deviceDot"></span><span id="deviceStatus">设备未连接</span></div>
+      <div class="device-label" id="deviceLabel">未选择设备</div>
+      <input id="addressInput" placeholder="手机 IP:7912 或 adb serial" />
+      <label class="check"><input type="checkbox" id="autoConnect" checked /> 自动连接</label>
+      <div class="btn-grid">
+        <button id="scanBtn" class="primary">扫描连接</button>
+        <button id="refreshBtn">刷新控件</button>
+        <button id="diagnoseBtn">诊断</button>
+        <button id="disconnectBtn">断开</button>
+      </div>
+      <pre id="diagnoseBox" class="diag hidden"></pre>
+    </div>
+    <div class="mini-log" id="miniLog"></div>
+  </aside>
+
+  <main>
+    <section class="page active" id="page-device">
+      <header class="page-head">
+        <div><h1>设备工作台</h1><p>实时画面、按钮识别、录制与任务执行</p></div>
+        <div class="head-actions">
+          <select id="taskSelect"></select>
+          <button id="runTaskBtn" class="primary">执行任务</button>
+          <button id="stopTaskBtn">停止任务</button>
+        </div>
+      </header>
+
+      <div class="device-layout">
+        <div class="left-column">
+          <div class="toolbar">
+            <input id="filterInput" placeholder="过滤按钮名称 / resource-id" />
+            <label class="check"><input type="checkbox" id="hideSystem" /> 隐藏系统 UI</label>
+            <span id="elementCount" class="badge">0 个按钮</span>
+            <label class="check"><input type="checkbox" id="showElements" checked /> 显示按钮识别</label>
+            <label class="check"><input type="checkbox" id="clearMode" /> 高清低延迟</label>
+          </div>
+          <div class="phone" id="phone">
+            <img id="liveFrame" class="phone-screen" alt="实时画面" />
+            <canvas id="videoCanvas" class="phone-screen hidden"></canvas>
+            <div id="overlay" class="overlay"></div>
+            <div class="phone-notch"></div>
+          </div>
+          <div class="stream-status"><span id="streamStatus">画面未启动</span><span id="videoStatus"></span></div>
+          <div class="nav-keys">
+            <button id="scrollUpBtn" title="向上滚动">↑</button>
+            <button id="backBtn" title="返回">‹</button>
+            <button id="homeBtn" title="主页">⌂</button>
+            <button id="recentsBtn" title="最近任务">▣</button>
+            <button id="scrollDownBtn" title="向下滚动">↓</button>
+          </div>
+        </div>
+
+        <div class="right-column">
+          <div class="panel">
+            <div class="panel-head"><h2>行为录制</h2><div class="row">
+              <button id="recordBtn" class="primary">开始录制</button>
+              <button id="selectButtonBtn">选择按钮</button>
+              <button id="clearRecordBtn">清空</button>
+              <button id="foldLoopsBtn">折叠循环</button>
+              <button id="toTaskBtn">转任务</button>
+            </div></div>
+            <div id="recordSteps" class="step-list"></div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head"><h2>单帧采集</h2><button id="captureBtn">采集当前页面</button></div>
+            <div id="captureBox" class="capture-box">尚未采集</div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head"><h2>执行过程</h2><button id="clearActionsBtn">清空日志</button></div>
+            <div id="executionList" class="execution-list"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="page" id="page-tasks">
+      <header class="page-head">
+        <div><h1>任务列表</h1><p>编辑、执行与导入导出 FlowSpec</p></div>
+        <div class="row">
+          <button id="refreshTasksBtn">刷新</button>
+          <button id="newTaskBtn" class="primary">新建</button>
+          <button id="saveTaskBtn">保存</button>
+          <button id="deleteTaskBtn">删除</button>
+          <button id="exportFlowBtn">导出 FlowSpec</button>
+          <button id="importFlowBtn">导入 FlowSpec</button>
+        </div>
+      </header>
+      <div class="tasks-layout">
+        <div class="task-list" id="taskList"></div>
+        <div class="task-editor">
+          <div class="tabs">
+            <button class="tab active" data-tab="json">JSON 编辑</button>
+            <button class="tab" data-tab="flow">流程视图</button>
+            <button class="tab" data-tab="mermaid">Mermaid</button>
+          </div>
+          <div class="tab-page active" id="tab-json">
+            <textarea id="taskJson" spellcheck="false"></textarea>
+            <div class="capabilities" id="capabilities"></div>
+          </div>
+          <div class="tab-page" id="tab-flow">
+            <div class="flow-toolbar">
+              <button id="flowZoomOut">−</button><span id="flowZoomLabel">100%</span>
+              <button id="flowZoomIn">＋</button><button id="flowFit">适应</button>
+            </div>
+            <div class="flow-stage" id="flowStage"><div class="flow-content" id="flowContent"></div></div>
+          </div>
+          <div class="tab-page" id="tab-mermaid"><pre id="mermaidSource"></pre></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="page" id="page-analysis">
+      <header class="page-head"><div><h1>回放分析</h1><p>统计任务执行日志</p></div><button id="refreshAnalysisBtn">刷新分析</button></header>
+      <div class="stat-grid" id="analysisStats"></div>
+      <div class="analysis-grid">
+        <div class="panel"><h2>事件列表</h2><div id="analysisEvents" class="event-list"></div></div>
+        <div class="panel"><h2>分布</h2><pre id="analysisDist"></pre></div>
+      </div>
+    </section>
+
+    <section class="page" id="page-records">
+      <header class="page-head"><div><h1>记录文件</h1><p>查看运行目录中的日志与采集结果</p></div>
+        <select id="recordFilter"><option value="all">全部</option><option value="log">日志</option><option value="text">文本/OCR</option><option value="ui">UI 层级</option><option value="report">报告</option></select>
+      </header>
+      <div class="records-layout">
+        <div id="recordList" class="record-list"></div>
+        <pre id="recordPreview" class="record-preview">选择左侧文件查看内容</pre>
+      </div>
+    </section>
+  </main>
+</div>
+<script type="module" src="app.js"></script>
+</body>
+</html>

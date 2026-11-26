@@ -19,6 +19,8 @@ check_cred.cmd
 gh_api.py
 .tmp_pack/
 .scrcpy-ref/
+node_modules/
+next/dist/
 *.mmd
 mermaid_preview.html
 mermaid_verify.html

@@ -1,0 +1,20 @@
+{
+  "name": "mobileauto-next",
+  "version": "0.1.0",
+  "description": "基于 scrcpy 的手机自动化工作台（Electron + TypeScript）",
+  "main": "dist/main/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "npm run build && electron .",
+    "start": "npm run dev"
+  },
+  "dependencies": {
+    "ws": "8.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "@types/ws": "latest",
+    "electron": "45.5.0",
+    "typescript": "7.0.2"
+  }
+}
