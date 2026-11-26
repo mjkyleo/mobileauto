@@ -9,6 +9,8 @@ import os
 import random
 import re
 import struct
+import time
+from collections import deque
 
 import websockets
 
@@ -47,6 +49,8 @@ class ScrcpyStream:
         self.height = 0
         self.description = b""
         self.clients = set()
+        self._send_tasks = {}
+        self._frame_times = deque()
         self._loop = None
         self._proc = None
         self._ws_server = None
@@ -161,12 +165,30 @@ class ScrcpyStream:
         finally:
             self.clients.discard(ws)
 
-    async def _broadcast(self, data):
+    def _broadcast(self, data):
+        """只保留每个客户端一个待发送帧，旧帧直接丢弃，避免背压拖慢抓帧。"""
         for ws in list(self.clients):
-            try:
-                await asyncio.wait_for(ws.send(data), timeout=0.2)
-            except Exception:
-                self.clients.discard(ws)
+            task = self._send_tasks.get(ws)
+            if task is not None and not task.done():
+                continue
+            self._send_tasks[ws] = asyncio.create_task(self._safe_send(ws, data))
+
+    async def _safe_send(self, ws, data):
+        try:
+            await asyncio.wait_for(ws.send(data), timeout=0.1)
+        except Exception:
+            self.clients.discard(ws)
+        finally:
+            self._send_tasks.pop(ws, None)
+
+    def sent_fps(self):
+        now = time.monotonic()
+        while self._frame_times and now - self._frame_times[0] > 2.0:
+            self._frame_times.popleft()
+        if not self._frame_times:
+            return 0
+        span = now - self._frame_times[0]
+        return round(len(self._frame_times) / max(span, 0.1), 1)
 
     async def _read_video(self):
         buf = b""
@@ -194,7 +216,8 @@ class ScrcpyStream:
                         self._update_description(payload)
                     elif payload:
                         self.has_frame = True
-                        await self._broadcast(b"\x01" + (b"\x01" if key else b"\x00") + _to_avcc(payload))
+                        self._frame_times.append(time.monotonic())
+                        self._broadcast(b"\x01" + (b"\x01" if key else b"\x00") + _to_avcc(payload))
         except Exception as e:
             self.log(f"H264 视频读取结束：{e}")
         finally:
@@ -208,7 +231,7 @@ class ScrcpyStream:
         description = b"".join(sps_pps)
         if description and description != self.description:
             self.description = description
-            asyncio.create_task(self._broadcast(b"\x00" + description))
+            self._broadcast(b"\x00" + description)
 
     def has_control(self):
         return bool(self.running and self._control_writer is not None)

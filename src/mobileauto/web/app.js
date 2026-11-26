@@ -73,6 +73,7 @@ window.addEventListener("pywebviewready", async () => {
   bindEvents();
   await call("set_stream_quality", !$("#showElements").checked);
   await call("set_detection", $("#showElements").checked);
+  if (typeof window.VideoDecoder !== "function") await call("set_h264_enabled", false);
   await poll();
   await loadTaskSelect();
   await loadExecution();
@@ -281,7 +282,9 @@ async function poll() {
 
   const stream = await call("get_stream_status");
   if (stream) {
-    $("#streamStatus").textContent = stream.status || "画面未启动";
+    let label = stream.status || "画面未启动";
+    if (stream.h264) label += ` · H264 ${stream.h264_fps || 0}fps`;
+    $("#streamStatus").textContent = label;
     const useH264 = !!stream.h264 && typeof window.VideoDecoder === "function";
     if (useH264 !== h264Active || (useH264 && videoSocket && videoSocket.url !== stream.ws_url)) {
       h264Active = useH264;
@@ -347,6 +350,7 @@ function ensureVideoDecoder() {
         console.error("VideoDecoder", e);
         h264Active = false;
         setVideoMode(false, null);
+        call("set_h264_enabled", false);
       },
     });
   }
@@ -381,10 +385,12 @@ function connectH264(wsUrl) {
       decoderDescription = data.slice(1);
       ensureVideoDecoder();
     } else if (data[0] === 1 && ensureVideoDecoder()) {
+      // WebCodecs 也只保留很短队列，旧帧直接丢，避免解码积压
+      if (videoDecoder.decodeQueueSize > 2) return;
       try {
         videoDecoder.decode(new EncodedVideoChunk({
           type: data[1] ? "key" : "delta",
-          timestamp: performance.now() * 1000,
+          timestamp: Math.round(performance.now() * 1000),
           data: data.slice(2),
         }));
       } catch (e) { /* 丢掉这一帧，下一帧继续 */ }

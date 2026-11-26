@@ -812,6 +812,13 @@ class WorkbenchApi:
         self.log("画面模式：高清低延迟" if state else "画面模式：按钮识别")
         return {"ok": True, "clear": state}
 
+    def set_h264_enabled(self, enabled=True):
+        from mobileauto import stream
+
+        state = stream.set_h264_enabled(enabled)
+        self.log("H264 视频已启用" if state else "H264 视频已关闭，使用快速截图")
+        return {"ok": True, "h264": state}
+
     # ---------- 任务列表 ----------
     def list_tasks(self):
         from mobileauto import tasks

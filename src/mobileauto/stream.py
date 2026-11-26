@@ -99,6 +99,12 @@ class FrameSource:
                 self._scrcpy_connect_task = None
             self.request_close_scrcpy()
 
+    def set_h264_enabled(self, enabled=True):
+        """浏览器不支持 WebCodecs 时关掉 H264，恢复截图链路。"""
+        if not enabled:
+            self._disable_scrcpy("浏览器不支持 WebCodecs，改用快速截图")
+        return not self._scrcpy_disabled
+
     def set_quality(self, clear=True):
         with self.lock:
             self.clear_mode = bool(clear)
@@ -115,6 +121,7 @@ class FrameSource:
     def get_status(self):
         with self.lock:
             h264 = bool(self._scrcpy and self._scrcpy.running and self._scrcpy.has_frame)
+            h264_fps = self._scrcpy.sent_fps() if h264 else 0
             return {
                 "status": self.status,
                 "port": self.port,
@@ -122,6 +129,7 @@ class FrameSource:
                 "url": f"http://127.0.0.1:{self.port}/stream",
                 "ws_url": f"ws://127.0.0.1:{WS_PORT}",
                 "h264": h264,
+                "h264_fps": h264_fps,
                 "last_error": self.last_error,
             }
 
@@ -414,6 +422,10 @@ def attach_conn(conn):
 def set_status(text):
     if _stream is not None:
         _stream.set_status(text)
+
+
+def set_h264_enabled(enabled=True):
+    return bool(_stream and _stream.set_h264_enabled(enabled))
 
 
 def set_quality(clear=True):
