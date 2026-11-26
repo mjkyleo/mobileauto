@@ -26,7 +26,7 @@
         <button id="scanBtn" class="primary">扫描连接</button>
         <button id="refreshBtn">刷新控件</button>
         <button id="diagnoseBtn">诊断</button>
-        <button id="disconnectBtn">断开</button>
+        <button id="disconnectBtn" class="danger">断开</button>
       </div>
       <pre id="diagnoseBox" class="diag hidden"></pre>
     </div>
@@ -40,7 +40,7 @@
         <div class="head-actions">
           <select id="taskSelect"></select>
           <button id="runTaskBtn" class="primary">执行任务</button>
-          <button id="stopTaskBtn">停止任务</button>
+          <button id="stopTaskBtn" class="danger">停止任务</button>
         </div>
       </header>
 
@@ -74,7 +74,7 @@
             <div class="panel-head"><h2>行为录制</h2><div class="row">
               <button id="recordBtn" class="primary">开始录制</button>
               <button id="selectButtonBtn">选择按钮</button>
-              <button id="clearRecordBtn">清空</button>
+              <button id="clearRecordBtn" class="danger">清空</button>
               <button id="foldLoopsBtn">折叠循环</button>
               <button id="toTaskBtn">转任务</button>
             </div></div>
@@ -87,7 +87,7 @@
           </div>
 
           <div class="panel">
-            <div class="panel-head"><h2>执行过程</h2><button id="clearActionsBtn">清空日志</button></div>
+            <div class="panel-head"><h2>执行过程</h2><button id="clearActionsBtn" class="danger">清空日志</button></div>
             <div id="executionList" class="execution-list"></div>
           </div>
         </div>
@@ -101,7 +101,7 @@
           <button id="refreshTasksBtn">刷新</button>
           <button id="newTaskBtn" class="primary">新建</button>
           <button id="saveTaskBtn">保存</button>
-          <button id="deleteTaskBtn">删除</button>
+          <button id="deleteTaskBtn" class="danger">删除</button>
           <button id="exportFlowBtn">导出 FlowSpec</button>
           <button id="importFlowBtn">导入 FlowSpec</button>
         </div>
@@ -148,6 +148,11 @@
         <pre id="recordPreview" class="record-preview">选择左侧文件查看内容</pre>
       </div>
     </section>
+
+    <footer class="terminal-status">
+      <div><span class="session">mobileauto</span> <span class="tmux-win">0:device</span> <span class="tmux-win">1:tasks</span> <span class="tmux-win">2:analysis</span> <span class="tmux-win">3:records</span></div>
+      <div><span id="terminalLoad">load: 0.00</span> · <span id="terminalClock">--:--:--</span> · <span class="user-badge">visitor@mobileauto</span></div>
+    </footer>
   </main>
 </div>
 <script type="module" src="app.js"></script>

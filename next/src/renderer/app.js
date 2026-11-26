@@ -31,6 +31,8 @@ async function poll() {
   renderState();
   renderOverlay();
   $("#miniLog").textContent = (state.logs || []).slice(-18).join("\n");
+  if ($("#terminalClock")) $("#terminalClock").textContent = new Date().toLocaleTimeString();
+  if ($("#terminalLoad")) $("#terminalLoad").textContent = `load: ${Number(stream?.h264Fps || 0).toFixed(2)}`;
   if (stream.h264 && typeof VideoDecoder !== "undefined") {
     video.start(stream.ws_url || stream.wsUrl);
   } else {
@@ -167,6 +169,8 @@ async function syncTaskSelect() {
 
 function showPage(name) {
   $$(".nav").forEach((b) => b.classList.toggle("active", b.dataset.page === name));
+  const index = ["device", "tasks", "analysis", "records"].indexOf(name);
+  $$(".tmux-win").forEach((win, i) => win.classList.toggle("active", i === index));
   $$(".page").forEach((p) => p.classList.toggle("active", p.id === `page-${name}`));
   if (name === "tasks") loadTasks();
   if (name === "analysis") loadAnalysis();
