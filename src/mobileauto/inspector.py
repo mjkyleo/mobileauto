@@ -13,6 +13,13 @@ from mobileauto.paths import APP_DIR
 _ADB_DEVICES_CACHE = {"at": 0.0, "value": []}
 
 
+def _as_text(value):
+    """ADB 输出按 UTF-8 容错解码，避免系统 GBK 解码二进制内容时抛异常。"""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value or ""
+
+
 def find_adb():
     env_adb = os.environ.get("ADB_PATH")
     if env_adb and os.path.isfile(env_adb):
@@ -51,10 +58,10 @@ def list_adb_devices(adb=None, refresh=False, timeout=3):
         return []
     try:
         result = subprocess.run(
-            [adb, "devices"], capture_output=True, text=True, timeout=timeout
+            [adb, "devices"], capture_output=True, timeout=timeout
         )
         devices = []
-        for line in result.stdout.splitlines()[1:]:
+        for line in _as_text(result.stdout).splitlines()[1:]:
             parts = line.split()
             if len(parts) >= 2 and parts[1] == "device":
                 devices.append(parts[0])
@@ -121,11 +128,11 @@ def _try_adb(adb, address, errors):
         serial = _adb_serial_from_address(address)
         try:
             result = subprocess.run(
-                [adb, "-s", serial, "get-state"], capture_output=True, text=True, timeout=3
+                [adb, "-s", serial, "get-state"], capture_output=True, timeout=3
             )
-            if result.returncode == 0 and "device" in (result.stdout or ""):
+            if result.returncode == 0 and "device" in _as_text(result.stdout):
                 return {"mode": "adb", "client": adb, "label": serial}
-            errors.append(f"adb -s {serial} 不可用: {result.stderr.strip()}")
+            errors.append(f"adb -s {serial} 不可用: {_as_text(result.stderr).strip()}")
         except Exception as e:
             errors.append(f"adb -s {serial} 失败: {e}")
         return None
@@ -214,18 +221,16 @@ def dump_hierarchy(conn):
     subprocess.run(
         [adb, "shell", "uiautomator", "dump", remote],
         capture_output=True,
-        text=True,
         timeout=30,
     )
     result = subprocess.run(
         [adb, "shell", "cat", remote],
         capture_output=True,
-        text=True,
         timeout=30,
     )
     if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or "adb dump hierarchy 失败")
-    return result.stdout
+        raise RuntimeError(_as_text(result.stderr).strip() or "adb dump hierarchy 失败")
+    return _as_text(result.stdout)
 
 
 def parse_bounds(value):
@@ -291,9 +296,9 @@ def screen_size(conn):
     adb = conn["client"]
     try:
         result = subprocess.run(
-            [adb, "shell", "wm", "size"], capture_output=True, text=True, timeout=20
+            [adb, "shell", "wm", "size"], capture_output=True, timeout=20
         )
-        match = re.search(r"(\d+)x(\d+)", result.stdout or "")
+        match = re.search(r"(\d+)x(\d+)", _as_text(result.stdout))
         if match:
             return int(match.group(1)), int(match.group(2))
     except Exception:
@@ -314,7 +319,6 @@ def click_at(conn, x, y):
         subprocess.run(
             [conn["client"], "shell", "input", "tap", str(int(x)), str(int(y))],
             capture_output=True,
-            text=True,
         )
 
 
@@ -327,7 +331,6 @@ def swipe(conn, x1, y1, x2, y2, duration=300):
             [conn["client"], "shell", "input", "swipe", str(int(x1)), str(int(y1)),
              str(int(x2)), str(int(y2)), str(int(duration))],
             capture_output=True,
-            text=True,
         )
 
 
@@ -338,7 +341,6 @@ def press_back(conn):
         subprocess.run(
             [conn["client"], "shell", "input", "keyevent", "4"],
             capture_output=True,
-            text=True,
         )
 
 
@@ -349,7 +351,6 @@ def press_home(conn):
         subprocess.run(
             [conn["client"], "shell", "input", "keyevent", "3"],
             capture_output=True,
-            text=True,
         )
 
 
@@ -360,5 +361,4 @@ def press_recents(conn):
         subprocess.run(
             [conn["client"], "shell", "input", "keyevent", "187"],
             capture_output=True,
-            text=True,
         )

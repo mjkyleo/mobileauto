@@ -19,6 +19,24 @@ CLEAR_INTERVAL = 0.02  # 纯净模式：约 50fps（scrcpy 只在画面变化时
 CLEAR_JPEG_QUALITY = 98
 DETECT_JPEG_QUALITY = 88
 SCRCPY_RETRY_SECONDS = 3.0
+_scrcpy_audio_patched = False
+
+
+def _patch_scrcpy_no_audio():
+    """让 adb-scr-py 以 audio=false 启动服务，避免 Android 17 音频捕获报错。"""
+    global _scrcpy_audio_patched
+    if _scrcpy_audio_patched:
+        return
+    try:
+        from adb_scr.device import android_device as device_module
+
+        async def _no_audio_api_level(serial, timeout=5.0):
+            return 29
+
+        device_module.adb_android_api_level = _no_audio_api_level
+        _scrcpy_audio_patched = True
+    except Exception:
+        pass
 
 
 def _blank_frame():
@@ -181,9 +199,12 @@ class FrameSource:
             # 1) scrcpy 设备端 H264 编码 + 客户端解码，帧新时就推送
             if await self._ensure_scrcpy(conn):
                 got_frame = await self._grab_scrcpy_frame()
-                if not got_frame:
+                dev = self._scrcpy_device
+                # 首帧可能要等十几秒；会话仍活着时保留它并用兼容截图兜底，
+                # 只有连接真的断开才重建，避免反复启动 scrcpy-server。
+                if not got_frame and (dev is None or not dev.is_connected):
                     await self._close_scrcpy()
-                    self._scrcpy_retry_at = time.monotonic() + SCRCPY_RETRY_SECONDS
+                    self._scrcpy_retry_at = time.monotonic() + SCRCPY_RETRY_SECONDS * 3
 
             # 2) scrcpy 不可用时回退到 u2 / adb 截图，保证功能不中断
             if not got_frame and conn is not None:
@@ -206,20 +227,28 @@ class FrameSource:
         now = time.monotonic()
         if now < self._scrcpy_retry_at:
             return False
-        self._scrcpy_retry_at = now + SCRCPY_RETRY_SECONDS
+        self._scrcpy_retry_at = now + SCRCPY_RETRY_SECONDS * 3
         try:
-            from adb_scr import AndroidDevice, adb_devices, init_lib
+            from adb_scr import (
+                AndroidDevice, ConnectionOptions, adb_devices, init_lib, set_screen_record_fps,
+            )
             from mobileauto import inspector
 
+            _patch_scrcpy_no_audio()
             adb = inspector.find_adb()
             if not adb:
                 return False
             await init_lib(adb_path=adb)
+            set_screen_record_fps(60)
             serials = list(await adb_devices() or [])
             serial = self._pick_serial(conn, serials)
             if not serial:
                 return False
-            device = AndroidDevice(serial, "tcp" if ":" in serial else "usb")
+            # 关闭主动 adb 探活，避免并发抓 UI 层级时误判掉线并反复重建会话
+            options = ConnectionOptions(probe_interval=None, io_timeout=10.0)
+            device = AndroidDevice(
+                serial, "tcp" if ":" in serial else "usb", options=options
+            )
             if not await device.connect():
                 return False
             self._scrcpy_device = device
