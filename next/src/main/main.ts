@@ -34,7 +34,7 @@ app.whenReady().then(() => {
       nodeIntegration: false,
     },
   });
-  windowRef.loadFile(path.join(__dirname, "..", "renderer", "index.html"));
+  windowRef.loadFile(path.join(root, "next", "src", "renderer", "index.html"));
   windowRef.on("closed", () => {
     windowRef = null;
     engine.stop();
