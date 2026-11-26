@@ -12,6 +12,7 @@ let selectedIndex = -1;
 let currentTask = null;
 let tasks = [];
 let records = [];
+let selectedRecord = "";
 let lastOverlaySignature = "";
 let flowScale = 1;
 let lastFrameAt = 0;
@@ -259,11 +260,24 @@ async function loadRecords() {
 function renderRecords() {
   const filter = $("#recordFilter").value;
   const list = records.filter((r) => filter === "all" || r.kind === filter);
-  $("#recordList").innerHTML = list.map((r) =>
-    `<div class="record-item" data-path="${escapeAttr(r.path)}">${escapeHtml(r.name)}<br><small>${escapeHtml(r.path)} · ${Math.round(r.size / 1024)}KB</small></div>`).join("");
+  const groups = new Map();
+  for (const item of list) {
+    const key = item.group || "其他记录";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(item);
+  }
+  $("#recordList").innerHTML = Array.from(groups.entries()).map(([group, items]) =>
+    `<div class="record-group">${escapeHtml(group)} · ${items.length} 项</div>` + items.map((r) =>
+      `<div class="record-item ${selectedRecord === r.path ? "selected" : ""}" data-path="${escapeAttr(r.path)}">
+        ${escapeHtml(r.name)}<small>${escapeHtml(r.path)} · ${Math.round(r.size / 1024)}KB</small>
+        <span class="record-label">${escapeHtml(r.label || "")}</span>
+      </div>`).join("")).join("") || '<div class="record-group">当前分类没有文件</div>';
+
   for (const item of $$(".record-item")) {
     item.addEventListener("click", async () => {
-      $("#recordPreview").textContent = await call("readRecord", item.dataset.path);
+      selectedRecord = item.dataset.path;
+      renderRecords();
+      $("#recordPreview").textContent = await call("readRecord", selectedRecord);
     });
   }
 }
@@ -382,7 +396,28 @@ function bindEvents() {
   $("#flowFit").addEventListener("click", () => { flowScale = 1; applyFlowView(); });
 
   $("#refreshAnalysisBtn").addEventListener("click", loadAnalysis);
+
   $("#recordFilter").addEventListener("change", renderRecords);
+  $("#refreshRecordsBtn").addEventListener("click", loadRecords);
+  $("#deleteRecordBtn").addEventListener("click", async () => {
+    if (!selectedRecord || !confirm(`删除 ${selectedRecord}？`)) return;
+    await call("deleteRecord", selectedRecord);
+    selectedRecord = "";
+    await loadRecords();
+    $("#recordPreview").textContent = "选择左侧文件查看内容";
+  });
+  const cleanup = (kind, label) => async () => {
+    if (!confirm(`确认清理${label}？此操作不可恢复。`)) return;
+    const count = await call("clearRecords", kind);
+    selectedRecord = "";
+    await loadRecords();
+    $("#recordPreview").textContent = `已删除 ${count} 项`;
+  };
+  $("#clearCaptureBtn").addEventListener("click", cleanup("capture", "采集/OCR 文件"));
+  $("#clearLogBtn").addEventListener("click", cleanup("log", "运行日志"));
+  $("#clearReportBtn").addEventListener("click", cleanup("report", "报告/活动日志"));
+  $("#clearDraftBtn").addEventListener("click", cleanup("draft", "录制草稿"));
+  $("#clearAllBtn").addEventListener("click", cleanup("all", "全部生成文件"));
 }
 
 function download(name, text) {

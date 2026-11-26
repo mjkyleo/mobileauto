@@ -140,9 +140,35 @@
     </section>
 
     <section class="page" id="page-records">
-      <header class="page-head"><div><h1>记录文件</h1><p>查看运行目录中的日志与采集结果</p></div>
-        <select id="recordFilter"><option value="all">全部</option><option value="log">日志</option><option value="text">文本/OCR</option><option value="ui">UI 层级</option><option value="report">报告</option></select>
+      <header class="page-head"><div><h1>记录文件</h1><p>只记录运行过程中真正产生的数据，按类别查看和清理</p></div>
+        <div class="row">
+          <select id="recordFilter">
+            <option value="all">全部</option><option value="log">运行日志</option>
+            <option value="text">采集/OCR/草稿</option><option value="ui">UI 层级</option>
+            <option value="report">报告/活动</option>
+          </select>
+          <button id="refreshRecordsBtn">刷新</button>
+          <button id="deleteRecordBtn" class="danger">删除选中</button>
+        </div>
       </header>
+      <div class="panel records-guide">
+        <h2>这里记录什么</h2>
+        <div class="guide-grid">
+          <div><span class="guide-key">运行日志</span><span>workbench.log、flow_live.log：启动、连接、任务动作</span></div>
+          <div><span class="guide-key">单帧采集</span><span>screen.png、ocr.txt、ui.xml：手动采集的当前页面</span></div>
+          <div><span class="guide-key">OCR 调试</span><span>任务引擎每轮识别出的原始文字</span></div>
+          <div><span class="guide-key">UI 层级</span><span>控件树 XML，只用于按钮识别</span></div>
+          <div><span class="guide-key">报告/活动</span><span>activity.jsonl 与手机回传报告，用于回放分析</span></div>
+          <div><span class="guide-key">录制草稿</span><span>recording_draft.json：录制步骤编辑数据</span></div>
+        </div>
+        <div class="row cleanup-row">
+          <button id="clearCaptureBtn" class="danger">清理采集/OCR</button>
+          <button id="clearLogBtn" class="danger">清理日志</button>
+          <button id="clearReportBtn" class="danger">清理报告</button>
+          <button id="clearDraftBtn" class="danger">清理草稿</button>
+          <button id="clearAllBtn" class="danger">清理全部生成文件</button>
+        </div>
+      </div>
       <div class="records-layout">
         <div id="recordList" class="record-list"></div>
         <pre id="recordPreview" class="record-preview">选择左侧文件查看内容</pre>

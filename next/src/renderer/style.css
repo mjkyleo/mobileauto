@@ -206,8 +206,17 @@ main { flex: 1; min-width: 0; overflow: auto; position: relative; }
 .event-list { max-height: 560px; overflow: auto; font-size: 11px; }
 .event-row { border-bottom: 1px solid var(--terminal-border); padding: 4px 0; }
 .event-row::before { content: "| "; color: var(--terminal-muted); }
+.records-guide { margin-bottom: 12px; }
+.guide-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 5px 16px; color: var(--terminal-muted); font-size: 11px; }
+.guide-grid > div { display: flex; gap: 8px; border-bottom: 1px dashed var(--terminal-border); padding: 3px 0; }
+.guide-key { color: var(--terminal-cyan); min-width: 70px; }
+.cleanup-row { margin-top: 9px; border-top: 1px solid var(--terminal-border); padding-top: 8px; }
 .records-layout { grid-template-columns: 330px 1fr; }
 .record-list { max-height: 70vh; overflow: auto; display: grid; gap: 4px; }
+.record-group { color: var(--terminal-amber); font-size: 11px; border-bottom: 1px solid var(--terminal-border); padding: 6px 2px 3px; margin-top: 4px; }
+.record-group::before { content: "# "; color: var(--terminal-muted); }
+.record-item.selected { border-color: var(--terminal-green); background: rgba(74,246,38,.08); }
+.record-label { color: var(--terminal-muted); font-size: 10px; margin-left: 6px; }
 .record-item { background: var(--terminal-panel); border: 1px solid var(--terminal-border); border-radius: var(--terminal-radius); padding: 7px; cursor: pointer; font-size: 12px; }
 .record-item:hover { border-color: var(--terminal-green); }
 .record-item small { color: var(--terminal-muted); }

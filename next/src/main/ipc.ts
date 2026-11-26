@@ -233,6 +233,12 @@ export class ApiHost {
 
     on("listRecords", () => this.store.listRecords());
     on("readRecord", (p: string) => this.store.readRecord(p));
+    on("deleteRecord", (p: string) => this.store.deleteRecord(p));
+    on("clearRecords", (kind: string) => {
+      const count = this.store.clearRecords(kind);
+      this.logger.log(`清理记录：${kind || "all"}，删除 ${count} 项`);
+      return count;
+    });
     on("listReports", () => {
       const files = ["activity.jsonl"];
       const dir = path.join(this.root, "runtime", "reports");

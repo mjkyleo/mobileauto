@@ -6,6 +6,30 @@ function safeName(name: string): string {
   return String(name || "").replace(/[\\/:*?"<>|]/g, "_").slice(0, 80);
 }
 
+function normalizeTask(data: any): TaskData {
+  const task = data && typeof data === "object" ? data : {};
+  // 旧版把状态机放在 states 数组，新版统一为 flow
+  if (!Array.isArray(task.flow) && Array.isArray(task.states)) {
+    task.flow = task.states;
+    task.states = {};
+  }
+  if (!Array.isArray(task.flow)) task.flow = [];
+  if (!task.states || Array.isArray(task.states)) task.states = {};
+  if (!task.capabilities || typeof task.capabilities !== "object" || Array.isArray(task.capabilities)) {
+    task.capabilities = {};
+  }
+  if (!Array.isArray(task.stuck_states)) task.stuck_states = [];
+  if (!Array.isArray(task.finish_info_keywords)) task.finish_info_keywords = [];
+  task.key = String(task.key || "");
+  task.name = String(task.name || task.key || "未命名任务");
+  task.engine = task.engine === "legacy" ? "legacy" : "configured";
+  task.max_loops = Number(task.max_loops || 30);
+  task.poll = Number(task.poll || 0.25);
+  task.tap_gap = Number(task.tap_gap || 0.35);
+  task.stuck_limit = Number(task.stuck_limit || 12);
+  return task as TaskData;
+}
+
 export class Store {
   readonly tasksDir: string;
   readonly rulesDir: string;
@@ -36,15 +60,16 @@ export class Store {
     const items: TaskData[] = [];
     for (const name of fs.readdirSync(this.tasksDir)) {
       if (!name.endsWith(".json")) continue;
-      const data = this.readJson<TaskData>(path.join(this.tasksDir, name));
-      if (data) items.push(data);
+      const data = this.readJson<any>(path.join(this.tasksDir, name));
+      if (data) items.push(normalizeTask(data));
     }
     return items.sort((a, b) => String(b.updated).localeCompare(String(a.updated)));
   }
 
   loadTask(key: string): TaskData | null {
     const file = path.join(this.tasksDir, `${safeName(key)}.json`);
-    return fs.existsSync(file) ? this.readJson<TaskData>(file) : null;
+    const data = fs.existsSync(file) ? this.readJson<any>(file) : null;
+    return data ? normalizeTask(data) : null;
   }
 
   saveTask(data: TaskData): TaskData {
@@ -115,8 +140,8 @@ export class Store {
     fs.writeFileSync(this.activityFile, kept.map((e) => JSON.stringify(e)).join("\n") + (kept.length ? "\n" : ""), "utf8");
   }
 
-  listRecords(): Array<{ path: string; name: string; size: number; mtime: number; kind: string }> {
-    const result: Array<{ path: string; name: string; size: number; mtime: number; kind: string }> = [];
+  listRecords(): Array<{ path: string; name: string; size: number; mtime: number; kind: string; group: string; label: string }> {
+    const result: Array<{ path: string; name: string; size: number; mtime: number; kind: string; group: string; label: string }> = [];
     const walk = (dir: string) => {
       if (!fs.existsSync(dir)) return;
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -126,18 +151,76 @@ export class Store {
           continue;
         }
         if (!/\.(log|txt|xml|json|jsonl|png)$/i.test(entry.name)) continue;
+        if (entry.name === "last_device_address.txt") continue;
         const stat = fs.statSync(full);
         const rel = path.relative(this.runtimeDir, full).replace(/\\/g, "/");
-        let kind = "all";
-        if (/\.log$/i.test(entry.name)) kind = "log";
-        else if (/ocr|\.txt$/i.test(entry.name)) kind = "text";
-        else if (/ui|\.xml$/i.test(entry.name)) kind = "ui";
-        else if (/report|activity/i.test(entry.name)) kind = "report";
-        result.push({ path: rel, name: entry.name, size: stat.size, mtime: stat.mtimeMs, kind });
+        let kind = "other";
+        let group = "其他记录";
+        let label = "临时文件";
+        if (/\.log$/i.test(entry.name)) { kind = "log"; group = "运行日志"; label = "工作台/任务运行日志"; }
+        else if (rel.startsWith("page_data/") || rel.startsWith("debug_phone/")) { kind = "text"; group = "单帧采集"; label = "截图 + OCR + 控件树"; }
+        else if (rel.startsWith("debug_ocr/")) { kind = "text"; group = "OCR 调试"; label = "任务引擎识别的原始文字"; }
+        else if (rel.startsWith("debug_ui/") || /ui|\.xml$/i.test(entry.name)) { kind = "ui"; group = "UI 层级"; label = "uiautomator 控件树"; }
+        else if (rel.startsWith("reports/") || /report/i.test(entry.name)) { kind = "report"; group = "分析报告"; label = "手机回传报告"; }
+        else if (entry.name === "activity.jsonl") { kind = "report"; group = "任务活动"; label = "点击/滚动/录制/任务事件"; }
+        else if (entry.name === "recording_draft.json") { kind = "text"; group = "录制草稿"; label = "录制步骤编辑数据"; }
+        result.push({ path: rel, name: entry.name, size: stat.size, mtime: stat.mtimeMs, kind, group, label });
       }
     };
     walk(this.runtimeDir);
     return result.sort((a, b) => b.mtime - a.mtime).slice(0, 800);
+  }
+
+  deleteRecord(relative: string): boolean {
+    const full = path.resolve(this.runtimeDir, relative);
+    if (!full.startsWith(path.resolve(this.runtimeDir))) return false;
+    try {
+      fs.unlinkSync(full);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  clearRecords(kind: string): number {
+    const target = String(kind || "");
+    const removeDir = (dir: string) => {
+      if (!fs.existsSync(dir)) return 0;
+      let count = 0;
+      for (const entry of fs.readdirSync(dir)) {
+        const full = path.join(dir, entry);
+        if (fs.statSync(full).isDirectory()) count += removeDir(full);
+        else { fs.unlinkSync(full); count++; }
+      }
+      fs.rmdirSync(dir);
+      return count;
+    };
+    if (target === "capture") {
+      return removeDir(path.join(this.runtimeDir, "page_data")) +
+        removeDir(path.join(this.runtimeDir, "debug_phone")) +
+        removeDir(path.join(this.runtimeDir, "debug_ocr")) +
+        removeDir(path.join(this.runtimeDir, "debug_ui"));
+    }
+    if (target === "log") {
+      return this.listRecords().filter((r) => r.kind === "log").reduce((n, r) => n + (this.deleteRecord(r.path) ? 1 : 0), 0);
+    }
+    if (target === "report") {
+      return this.listRecords().filter((r) => r.kind === "report").reduce((n, r) => n + (this.deleteRecord(r.path) ? 1 : 0), 0);
+    }
+    if (target === "draft") {
+      return this.listRecords().filter((r) => r.group === "录制草稿").reduce((n, r) => n + (this.deleteRecord(r.path) ? 1 : 0), 0);
+    }
+    if (target === "all") {
+      let count = 0;
+      for (const entry of fs.readdirSync(this.runtimeDir)) {
+        if (entry === "last_device_address.txt") continue;
+        const full = path.join(this.runtimeDir, entry);
+        if (fs.statSync(full).isDirectory()) count += removeDir(full);
+        else { fs.unlinkSync(full); count++; }
+      }
+      return count;
+    }
+    return 0;
   }
 
   readRecord(relative: string): string {
