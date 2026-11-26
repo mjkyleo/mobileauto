@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+*.log
+
+# 运行时数据（日志、录制、截图、报告）
+runtime/
+*.jsonl
+
+# adb / fastboot 等二进制工具（体积大，不入库）
+platform-tools/
+
+# 本地临时/凭据文件
+cred_input.txt
+check_cred.cmd
+gh_api.py
+.tmp_pack/
+*.mmd
+mermaid_preview.html
+mermaid_verify.html
+
+# IDE
+.vscode/
+.idea/
+pyrightconfig.json

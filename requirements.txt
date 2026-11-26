@@ -1,3 +1,6 @@
 opencv-python
 numpy
 rapidocr-onnxruntime
+uiautomator2
+pywebview>=5.0
+adb-scr-py>=0.4

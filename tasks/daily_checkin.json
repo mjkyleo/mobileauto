@@ -1,0 +1,73 @@
+{
+  "key": "daily_checkin",
+  "name": "示例-每日打卡",
+  "description": "配置驱动的状态机示例：打开App，找到打卡按钮，点击后结束（可复制修改）",
+  "app": "com.example.app",
+  "rule": "默认策略",
+  "enabled": true,
+  "max_loops": 1,
+  "engine": "configured",
+  "capabilities": {
+    "ocr": true,
+    "action_verify": true,
+    "anti_stuck": false,
+    "dedupe": true,
+    "structured_log": true,
+    "end_detect": true,
+    "auto_start": true,
+    "entitlement": false
+  },
+  "states": [
+    {
+      "name": "DONE",
+      "match": [
+        "已完成",
+        "明日再来"
+      ],
+      "action": "finish"
+    },
+    {
+      "name": "REWARD",
+      "match": [
+        "领取奖励",
+        "立即领取"
+      ],
+      "exclude": [
+        "秒后"
+      ],
+      "action": "click_match",
+      "count": true
+    },
+    {
+      "name": "COUNTDOWN",
+      "match": [
+        "秒后可领取"
+      ],
+      "action": "wait"
+    },
+    {
+      "name": "MAIN",
+      "match": [
+        "去领取",
+        "打卡"
+      ],
+      "action": "click_match"
+    },
+    {
+      "name": "HOME",
+      "match": [
+        "首页",
+        "我的"
+      ],
+      "action": "wait"
+    }
+  ],
+  "stuck_states": [
+    "REWARD"
+  ],
+  "finish_info_keywords": [
+    "已完成",
+    "明日再来"
+  ],
+  "updated": "2026-11-25 17:30:28"
+}

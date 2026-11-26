@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>手机自动化工作台</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">MA</div>
+        <div>
+          <h1>手机自动化</h1>
+          <p>Workbench</p>
+        </div>
+      </div>
+
+      <nav class="nav">
+        <button class="nav-item active" data-page="device"><span>◎</span>设备工作台</button>
+        <button class="nav-item" data-page="tasks"><span>▣</span>任务列表</button>
+        <button class="nav-item" data-page="analysis"><span>◈</span>回放分析</button>
+        <button class="nav-item" data-page="records"><span>▤</span>记录文件</button>
+      </nav>
+
+      <div class="device-card">
+        <div class="device-title">设备状态</div>
+        <div id="deviceStatus" class="device-status">未连接</div>
+        <div id="deviceLabel" class="device-label">等待自动扫描</div>
+        <input id="deviceAddress" type="text" placeholder="手机IP:7912 或 adb serial" title="手动指定设备地址（可选）" />
+        <label class="check"><input id="autoConnect" type="checkbox" checked /> 自动连接</label>
+        <div class="device-actions">
+          <button id="scanBtn" class="btn tiny primary">开始扫描</button>
+          <button id="refreshBtn" class="btn tiny">刷新</button>
+          <button id="disconnectBtn" class="btn tiny ghost">断开</button>
+          <button id="diagnoseBtn" class="btn tiny ghost">诊断</button>
+        </div>
+        <div id="diagBox" class="diag-box hidden"></div>
+      </div>
+
+      <div class="sidebar-footer">
+        Python backend<br />pywebview UI
+      </div>
+    </aside>
+
+    <main class="main">
+      <section id="page-device" class="page active">
+        <div class="page-head">
+          <div>
+            <h2>设备工作台</h2>
+            <p>实时画面 + 可点击按钮 + 任务执行过程 + 采集</p>
+          </div>
+          <div class="head-actions">
+            <select id="taskSelect" title="选择要执行的任务"></select>
+            <button id="startTaskBtn" class="btn primary">执行任务</button>
+            <button id="stopTaskBtn" class="btn danger" disabled>停止任务</button>
+          </div>
+        </div>
+
+        <div class="toolbar">
+          <input id="filterInput" type="text" placeholder="过滤按钮名称" />
+          <label class="check"><input id="hideSystem" type="checkbox" checked /> 隐藏系统 UI</label>
+          <span class="hint">按钮列表后台自动刷新</span>
+          <span id="elementCount" class="pill">0 个按钮</span>
+        </div>
+
+        <div class="device-layout">
+          <div class="device-left">
+            <div class="panel phone-panel">
+              <div class="panel-title">实时画面 <span class="hint-inline" id="streamStatus">画面未启动</span></div>
+              <div class="phone-stage">
+                <div id="phone" class="phone">
+                  <img id="liveFrame" class="phone-screen" src="http://127.0.0.1:8765/stream" alt="实时画面" />
+                  <div class="phone-notch"></div>
+                  <div id="selectOverlay" class="select-overlay hidden"></div>
+                </div>
+              </div>
+              <div class="phone-nav" title="安卓系统按键">
+                <button id="backBtn" class="nav-key" title="返回">返回</button>
+                <button id="homeBtn" class="nav-key" title="主页">主页</button>
+                <button id="recentsBtn" class="nav-key" title="最近任务">最近</button>
+              </div>
+              <div class="legend"><i></i>红框 = 可点击按钮 · 点「选点」后可在画面上人工定位</div>
+
+              <div class="collect-inline">
+                <button id="collectBtn" class="btn tiny primary">采集当前页面</button>
+                <div id="captureResult" class="capture-result"></div>
+              </div>
+            </div>
+
+            <div class="panel execution-panel" id="executionPanel">
+              <div class="panel-title">执行过程 <span class="hint-inline">最近 5 步</span></div>
+              <div id="executionList" class="execution-list"></div>
+            </div>
+          </div>
+
+          <div class="device-right">
+            <div class="panel record-panel" id="recordPanel">
+              <div class="panel-title">行为录制 <span class="hint-inline" id="recordStatus">未录制</span></div>
+              <div class="record-bar">
+                <button id="recordToggleBtn" class="btn tiny primary">开始录制</button>
+                <button id="selectPointBtn" class="btn tiny">选点/框选</button>
+                <button id="foldLoopBtn" class="btn tiny">折叠循环</button>
+                <button id="clearActivityBtn" class="btn tiny ghost">清空</button>
+                <button id="recordToTaskBtn" class="btn tiny">转成任务</button>
+              </div>
+              <div class="record-guide">开启录制后，点击按钮、采集页面、按系统键都会记为一步；按钮识别不到时，点「选点/框选」在实时画面上直接选位置。步骤可改名、改动作、改坐标、排序。</div>
+              <div id="activityList" class="activity-list"></div>
+            </div>
+
+            <div class="panel element-panel">
+              <div class="panel-title">可点击按钮</div>
+              <div id="buttonList" class="button-list"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="page-tasks" class="page">
+        <div class="page-head">
+          <div>
+            <h2>任务列表</h2>
+            <p>管理多个自动化任务：启停、编辑、选择后在设备工作台执行</p>
+          </div>
+          <div class="head-actions">
+            <button id="refreshTasksBtn" class="btn">刷新</button>
+            <button id="importFlowBtn" class="btn">导入流程JSON</button>
+            <button id="exportFlowBtn" class="btn">导出流程JSON</button>
+            <button id="newTaskBtn" class="btn primary">新建任务</button>
+          </div>
+        </div>
+        <div class="tasks-layout">
+          <div class="panel tasks-list-panel">
+            <div class="panel-title">任务</div>
+            <div id="taskList" class="task-list"></div>
+          </div>
+          <div class="panel tasks-editor-panel">
+            <div class="panel-title">任务编辑 <span class="hint-inline" id="taskEditorHint">选择左侧任务，或点「新建任务」</span></div>
+            <div class="task-view-tabs">
+              <button class="tab-btn active" data-tab="json">JSON 编辑</button>
+              <button class="tab-btn" data-tab="flow">流程视图</button>
+              <button class="tab-btn" data-tab="mermaid">Mermaid</button>
+            </div>
+            <div id="tab-json" class="tab-pane active">
+              <div class="cap-strip" id="capGrid" title="可选能力：勾选即启用"></div>
+              <textarea id="taskJson" class="rule-json compact" spellcheck="false" placeholder="任务 JSON：每个任务自带规则（flow）、能力与状态"></textarea>
+            </div>
+            <div id="tab-flow" class="tab-pane">
+              <div id="flowStats" class="flow-stats"></div>
+              <div class="flow-toolbar">
+                <button id="flowZoomOutBtn" class="btn tiny" title="缩小">−</button>
+                <span id="flowZoomLabel" class="flow-zoom-label">100%</span>
+                <button id="flowZoomInBtn" class="btn tiny" title="放大">＋</button>
+                <button id="flowFitBtn" class="btn tiny" title="适应窗口">适应</button>
+                <span class="flow-toolbar-hint">滚轮缩放 · 拖拽平移</span>
+              </div>
+              <div id="flowGraph" class="flow-graph">选择左侧任务后显示流程图</div>
+            </div>
+            <div id="tab-mermaid" class="tab-pane">
+              <div class="mermaid-head">
+                <span>Mermaid 源码（可复制到支持 Mermaid 的编辑器）</span>
+              </div>
+              <pre id="mermaidCode" class="mermaid-code">选择左侧任务后生成</pre>
+            </div>
+            <div class="rule-actions">
+              <button id="saveTaskBtn" class="btn primary">保存任务</button>
+              <button id="deleteTaskBtn" class="btn ghost">删除任务</button>
+            </div>
+            <div id="taskErrors" class="rule-errors"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="page-records" class="page">
+        <div class="page-head">
+          <div>
+            <h2>记录文件</h2>
+            <p>查看工作台生成的所有文件：运行日志、采集截图与 OCR、UI 层级 XML、录制/执行日志、回放报告</p>
+          </div>
+          <button id="refreshRecordsBtn" class="btn">刷新列表</button>
+        </div>
+        <div class="panel records-guide">
+          <b>这里看什么：</b>
+          <span>① <code>page_data/*单帧采集/ocr.txt</code> 是采集时识别出的文字和坐标，用于写规则；</span>
+          <span>② <code>page_data/*单帧采集/ui.xml</code> 是界面控件树；</span>
+          <span>③ <code>*.log</code> 是任务运行日志，排查卡在哪一步；</span>
+          <span>④ <code>activity.jsonl</code> 是录制与执行日志（点击、采集、返回、超时）；</span>
+          <span>⑤ <code>reports/</code> 是回放统计。点左侧文件即可在下方预览文本，图片请用实时画面或采集结果查看。</span>
+        </div>
+        <div class="records-toolbar">
+          <button class="btn tiny filter-btn active" data-filter="all">全部</button>
+          <button class="btn tiny filter-btn" data-filter="log">日志</button>
+          <button class="btn tiny filter-btn" data-filter="ocr">OCR/文本</button>
+          <button class="btn tiny filter-btn" data-filter="xml">UI 层级</button>
+          <button class="btn tiny filter-btn" data-filter="report">报告</button>
+          <span class="hint" id="recordCount"></span>
+        </div>
+        <div class="records-layout">
+          <div class="panel records-list-panel">
+            <div class="panel-title">文件列表（按时间倒序）</div>
+            <div id="recordList" class="record-list"></div>
+          </div>
+          <div class="panel records-preview-panel">
+            <div class="panel-title">内容预览</div>
+            <pre id="recordPreview" class="record-preview">请选择左侧文件</pre>
+          </div>
+        </div>
+      </section>
+
+      <section id="page-analysis" class="page">
+        <div class="page-head">
+          <div>
+            <h2>回放分析</h2>
+            <p>分析任务执行日志 activity.jsonl：动作分布、来源、成功/失败与最近事件</p>
+          </div>
+          <div class="head-actions">
+            <select id="reportSelect"></select>
+            <button id="refreshReportsBtn" class="btn">刷新列表</button>
+            <button id="analyzeBtn" class="btn primary">分析</button>
+          </div>
+        </div>
+        <div id="analysisSummary" class="analysis-summary"></div>
+        <div class="analysis-layout">
+          <div class="panel">
+            <div class="panel-title">动作分布</div>
+            <div id="levelStats" class="stat-bars"></div>
+            <div class="panel-title" style="margin-top:16px">结果分布</div>
+            <div id="resultStats" class="stat-bars"></div>
+            <div class="panel-title" style="margin-top:16px">来源分布</div>
+            <div id="sourceStats" class="stat-bars"></div>
+            <div class="panel-title" style="margin-top:16px">平均耗时（ms）</div>
+            <div id="costStats" class="stat-bars"></div>
+          </div>
+          <div class="panel">
+            <div class="panel-title">最近事件</div>
+            <div id="eventList" class="event-list"></div>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+  <input id="importFlowFile" type="file" accept="application/json,.json" class="hidden" />
+  <script src="vendor/mermaid.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

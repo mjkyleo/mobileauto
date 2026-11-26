@@ -1,0 +1,263 @@
+{
+  "version": 1,
+  "name": "新规则 14:51:42",
+  "app": "com.luna.music",
+  "updated": "2026-11-25 14:51:42",
+  "targets": [
+    {
+      "key": "领取奖励",
+      "priority": 1,
+      "match": {
+        "type": "text",
+        "values": [
+          "领取奖励"
+        ],
+        "fuzzy": true
+      },
+      "action": "click",
+      "roi": {
+        "x": [
+          0.25,
+          0.75
+        ],
+        "y": [
+          0.35,
+          0.7
+        ]
+      },
+      "close": false
+    },
+    {
+      "key": "继续观看",
+      "priority": 2,
+      "match": {
+        "type": "text",
+        "values": [
+          "继续观看"
+        ],
+        "fuzzy": true
+      },
+      "action": "click",
+      "roi": {
+        "x": [
+          0.25,
+          0.75
+        ],
+        "y": [
+          0.35,
+          0.7
+        ]
+      },
+      "close": false
+    },
+    {
+      "key": "继续互动",
+      "priority": 3,
+      "match": {
+        "type": "text",
+        "values": [
+          "继续互动"
+        ],
+        "fuzzy": true
+      },
+      "action": "click",
+      "roi": {
+        "x": [
+          0.25,
+          0.75
+        ],
+        "y": [
+          0.35,
+          0.7
+        ]
+      },
+      "close": false
+    },
+    {
+      "key": "领取成功",
+      "priority": 4,
+      "match": {
+        "type": "text",
+        "values": [
+          "领取成功"
+        ],
+        "fuzzy": true
+      },
+      "action": "close",
+      "roi": {
+        "x": [
+          0,
+          1
+        ],
+        "y": [
+          0.01,
+          0.97
+        ]
+      },
+      "close": true,
+      "close_ratio": [
+        0.915,
+        0.07
+      ]
+    }
+  ],
+  "fallback": {
+    "template": {
+      "enabled": true,
+      "threshold": 0.85,
+      "dir": "templates"
+    },
+    "ocr": {
+      "enabled": true,
+      "score": 0.5,
+      "max_width": 720
+    },
+    "ratio": {
+      "enabled": true,
+      "points": {
+        "领取奖励": [
+          0.5,
+          0.52
+        ],
+        "继续观看": [
+          0.5,
+          0.52
+        ],
+        "继续互动": [
+          0.5,
+          0.52
+        ]
+      }
+    }
+  },
+  "guards": {
+    "countdown_wait": true,
+    "home_stop": true,
+    "dedupe_ms": 2500,
+    "click_cooldown_ms": 2000,
+    "miss_back_limit": 5
+  },
+  "flow": {
+    "loop_from": 2,
+    "max_loops": 3,
+    "steps": [
+      {
+        "key": "跳过开屏广告",
+        "find": [
+          "福利中心",
+          "免费听时长",
+          "领时长",
+          "听歌总时长",
+          "做任务赚金币"
+        ],
+        "click_text": [
+          "跳过广告",
+          "跳过开屏",
+          "跳过",
+          "关闭广告"
+        ],
+        "click_ratio": [
+          0.88,
+          0.06
+        ],
+        "timeout_ms": 8000,
+        "interval_ms": 200,
+        "max_clicks": 8,
+        "ocr_width": 640
+      },
+      {
+        "key": "进入福利页",
+        "find": [
+          "福利中心",
+          "领时长",
+          "免费听时长",
+          "做任务赚金币"
+        ],
+        "click_text": [
+          "福利"
+        ],
+        "click_ratio": [
+          0.7,
+          0.935
+        ],
+        "timeout_ms": 4000,
+        "interval_ms": 250,
+        "max_clicks": 1,
+        "ocr_width": 640
+      },
+      {
+        "key": "点击领时长",
+        "find": [
+          "秒后可领取奖励",
+          "领取成功",
+          "立即下载",
+          "再看2个视频",
+          "恭喜获得奖励"
+        ],
+        "click_text": [
+          "领时长",
+          "再看1次提前解锁下一天"
+        ],
+        "click_ratio": [
+          0.84,
+          0.395
+        ],
+        "timeout_ms": 5000,
+        "interval_ms": 200,
+        "max_clicks": 1,
+        "ocr_width": 640
+      },
+      {
+        "key": "等待广告结束",
+        "find": [
+          "领取奖励",
+          "再看2个视频",
+          "坚持退出",
+          "恭喜获得奖励",
+          "优惠券已放入"
+        ],
+        "stay_text": [
+          "秒后可领取奖励",
+          "领取成功"
+        ],
+        "timeout_ms": 60000,
+        "interval_ms": 400,
+        "ocr_width": 640
+      },
+      {
+        "key": "点击领取奖励",
+        "find": [
+          "恭喜获得奖励",
+          "优惠券已放入",
+          "立即使用"
+        ],
+        "click_text": [
+          "领取奖励",
+          "立即领取"
+        ],
+        "click_ratio": [
+          0.5,
+          0.554
+        ],
+        "timeout_ms": 8000,
+        "interval_ms": 250,
+        "max_clicks": 3,
+        "ocr_width": 640
+      },
+      {
+        "key": "关闭奖励弹窗",
+        "find": [
+          "领时长",
+          "做任务赚金币",
+          "听歌赚金币",
+          "免费听时长"
+        ],
+        "action": "back",
+        "timeout_ms": 5000,
+        "interval_ms": 300,
+        "max_clicks": 2,
+        "ocr_width": 640
+      }
+    ]
+  }
+}
