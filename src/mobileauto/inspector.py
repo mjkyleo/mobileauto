@@ -3,10 +3,14 @@
 import os
 import re
 import shutil
+import socket
 import subprocess
+import time
 import xml.etree.ElementTree as ET
 
 from mobileauto.paths import APP_DIR
+
+_ADB_DEVICES_CACHE = {"at": 0.0, "value": []}
 
 
 def find_adb():
@@ -27,89 +31,177 @@ def find_adb():
     return None
 
 
+def _port_open(host, port, timeout=0.25):
+    """快速探测服务端口，避免对不存在的地址执行慢速连接。"""
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
+def list_adb_devices(adb=None, refresh=False, timeout=3):
+    """带短缓存的 adb devices，减少自动连接时的重复进程启动。"""
+    now = time.monotonic()
+    if not refresh and now - _ADB_DEVICES_CACHE["at"] < 0.5:
+        return list(_ADB_DEVICES_CACHE["value"])
+    adb = adb or find_adb()
+    if not adb:
+        _ADB_DEVICES_CACHE.update(at=now, value=[])
+        return []
+    try:
+        result = subprocess.run(
+            [adb, "devices"], capture_output=True, text=True, timeout=timeout
+        )
+        devices = []
+        for line in result.stdout.splitlines()[1:]:
+            parts = line.split()
+            if len(parts) >= 2 and parts[1] == "device":
+                devices.append(parts[0])
+    except Exception:
+        devices = []
+    _ADB_DEVICES_CACHE.update(at=now, value=devices)
+    return list(devices)
+
+
 def diagnose():
     """返回连接环境诊断，供前端功能区显示。"""
-    info = {"adb": find_adb() or "", "adb_devices": [], "u2_local": False, "hints": []}
-    if info["adb"]:
-        try:
-            result = subprocess.run(
-                [info["adb"], "devices"], capture_output=True, text=True, timeout=8
-            )
-            for line in result.stdout.splitlines()[1:]:
-                parts = line.split()
-                if len(parts) >= 2 and parts[1] == "device":
-                    info["adb_devices"].append(parts[0])
-        except Exception as e:
-            info["hints"].append(f"adb devices 失败: {e}")
+    adb = find_adb()
+    devices = list_adb_devices(adb, refresh=True)
+    info = {"adb": adb or "", "adb_devices": devices, "u2_local": False, "hints": []}
+    if adb:
+        if not devices:
+            info["hints"].append("adb 已找到，但未发现已授权设备")
     else:
         info["hints"].append("未找到 adb.exe，请放到项目目录或加入 PATH")
-    try:
-        import socket
-
-        s = socket.create_connection(("127.0.0.1", 7912), timeout=1)
-        s.close()
-        info["u2_local"] = True
-    except Exception:
+    info["u2_local"] = _port_open("127.0.0.1", 7912, timeout=0.3)
+    if not info["u2_local"]:
         info["hints"].append("本机 7912 无 u2 服务（手机端 atx-agent 未启动）")
-    if not info["adb_devices"] and not info["u2_local"]:
+    if not devices and not info["u2_local"]:
         info["hints"].append("请连接手机并开启 USB 调试，或填入手机 IP:7912 后连接")
     return info
+
+
+def _looks_like_u2_address(address):
+    text = (address or "").strip()
+    if text.startswith("http://") or text.startswith("https://"):
+        return True
+    return bool(re.match(r"^\d{1,3}(?:\.\d{1,3}){3}:7912$", text))
+
+
+def _adb_serial_from_address(address):
+    """IP:7912 -> IP:5555；http 地址取 host。"""
+    text = (address or "").strip()
+    if text.startswith("http://") or text.startswith("https://"):
+        text = text.split("://", 1)[1].split("/", 1)[0]
+    if text.endswith(":7912"):
+        return text.rsplit(":", 1)[0] + ":5555"
+    return text
+
+
+def _try_u2(addresses, errors):
+    try:
+        import uiautomator2 as u2
+    except Exception as e:
+        errors.append(f"u2 import: {e}")
+        return None
+    for addr in addresses:
+        try:
+            client = u2.connect() if not addr else u2.connect(addr)
+            return {"mode": "u2", "client": client, "label": addr or "自动检测"}
+        except Exception as e:
+            errors.append(f"u2 {addr or 'auto'}: {e}")
+    return None
+
+
+def _try_adb(adb, address, errors):
+    if not adb:
+        return None
+    if address:
+        serial = _adb_serial_from_address(address)
+        try:
+            result = subprocess.run(
+                [adb, "-s", serial, "get-state"], capture_output=True, text=True, timeout=3
+            )
+            if result.returncode == 0 and "device" in (result.stdout or ""):
+                return {"mode": "adb", "client": adb, "label": serial}
+            errors.append(f"adb -s {serial} 不可用: {result.stderr.strip()}")
+        except Exception as e:
+            errors.append(f"adb -s {serial} 失败: {e}")
+        return None
+    serials = list_adb_devices(adb, refresh=True)
+    if serials:
+        return {"mode": "adb", "client": adb, "label": serials[0]}
+    errors.append("adb devices 未发现已授权设备")
+    return None
 
 
 def connect_device(mode="auto", address=""):
     """返回 {'mode': 'u2'|'adb', 'client': ...}。address 可指定 u2 地址或 adb serial。"""
     errors = []
     address = (address or "").strip()
-
-    if mode in ("auto", "u2"):
-        try:
-            import uiautomator2 as u2
-
-            if address:
-                addresses = [address]
-            else:
-                addresses = [
-                    os.environ.get("ATX_AGENT_URL", "http://127.0.0.1:7912"),
-                    "http://127.0.0.1:7912",
-                    "127.0.0.1:7912",
-                    "",  # u2.connect() 自动检测（原来就有，恢复它）
-                ]
-            for addr in addresses:
-                try:
-                    client = u2.connect(addr) if addr else u2.connect()
-                    return {"mode": "u2", "client": client, "label": addr or "自动检测"}
-                except Exception as e:
-                    errors.append(f"u2 {addr or 'auto'}: {e}")
-        except Exception as e:
-            errors.append(f"u2 import: {e}")
-
-    if mode == "u2":
-        raise RuntimeError("u2 连接失败\n" + "\n".join(errors[-3:]))
-
     adb = find_adb()
-    if adb:
-        if address:
-            result = subprocess.run(
-                [adb, "-s", address, "get-state"], capture_output=True, text=True, timeout=8
-            )
-            if result.returncode == 0 and "device" in (result.stdout or ""):
-                return {"mode": "adb", "client": adb, "label": address}
-            errors.append(f"adb -s {address} 不可用: {result.stderr.strip()}")
+
+    if address:
+        if _looks_like_u2_address(address):
+            conn = _try_u2([address], errors)
+            if conn:
+                return conn
+            if mode == "u2":
+                raise RuntimeError("u2 连接失败\n" + "\n".join(errors[-3:]))
+            conn = _try_adb(adb, address, errors)
+            if conn:
+                return conn
         else:
-            check = subprocess.run([adb, "devices"], capture_output=True, text=True)
-            if check.returncode == 0:
-                lines = [
-                    line.split()[0]
-                    for line in check.stdout.splitlines()[1:]
-                    if len(line.split()) >= 2 and line.split()[1] == "device"
-                ]
-                if lines:
-                    return {
-                        "mode": "adb",
-                        "client": adb,
-                        "label": lines[0],
-                    }
-                errors.append("adb devices 未发现已授权设备")
+            if mode == "adb":
+                conn = _try_adb(adb, address, errors)
+                if conn:
+                    return conn
+            else:
+                conn = _try_adb(adb, address, errors)
+                if conn:
+                    return conn
+                host = address.rsplit(":", 1)[0] if ":" in address else address
+                conn = _try_u2([f"{host}:7912"], errors)
+                if conn:
+                    return conn
+            if mode == "u2":
+                conn = _try_u2([address], errors)
+                if conn:
+                    return conn
+        raise RuntimeError("无法连接设备\n" + "\n".join(errors[-3:]))
+
+    # 无显式地址：先看本机 atx-agent 端口，再查 adb，最后才尝试 u2 自动发现
+    env_url = os.environ.get("ATX_AGENT_URL", "").strip()
+    local_u2 = _port_open("127.0.0.1", 7912, timeout=0.2)
+    u2_addresses = []
+    if env_url:
+        u2_addresses.append(env_url)
+    if local_u2:
+        u2_addresses.extend(["http://127.0.0.1:7912", "127.0.0.1:7912"])
+    if mode == "u2" or (mode == "auto" and not local_u2):
+        u2_addresses.append("")
+
+    if mode == "u2" and u2_addresses:
+        conn = _try_u2(u2_addresses, errors)
+        if conn:
+            return conn
+    if mode == "auto":
+        if local_u2:
+            conn = _try_u2(u2_addresses, errors)
+            if conn:
+                return conn
+        conn = _try_adb(adb, "", errors)
+        if conn:
+            return conn
+        if "" not in u2_addresses:
+            conn = _try_u2([""], errors)
+            if conn:
+                return conn
+    if mode == "adb":
+        conn = _try_adb(adb, "", errors)
+        if conn:
+            return conn
     raise RuntimeError("无法连接设备\n" + "\n".join(errors[-3:]))
 
 

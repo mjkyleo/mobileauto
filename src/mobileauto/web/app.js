@@ -10,6 +10,7 @@ let tasksCache = [];
 let recordingDraft = [];
 let selectingPoint = false;
 let selectButtonMode = false;
+let lastPhoneSignature = "";
 
 // 可选能力清单（与 flow_engine.DEFAULT_CAPABILITIES 对齐）
 const CAPABILITIES = [
@@ -66,6 +67,7 @@ window.addEventListener("pywebviewready", async () => {
   api = window.pywebview.api;
   bindEvents();
   await call("set_stream_quality", !$("#showElements").checked);
+  await call("set_detection", $("#showElements").checked);
   await poll();
   await loadTaskSelect();
   await loadExecution();
@@ -129,7 +131,10 @@ function bindEvents() {
   $("#homeBtn").addEventListener("click", () => call("press_home"));
   $("#recentsBtn").addEventListener("click", () => call("press_recents"));
   $("#showElements").addEventListener("change", async () => {
-    await call("set_stream_quality", !$("#showElements").checked);
+    const on = $("#showElements").checked;
+    await call("set_stream_quality", !on);
+    await call("set_detection", on);
+    lastPhoneSignature = "";
     renderFromState();
     await poll();
   });
@@ -322,7 +327,24 @@ function renderFromState() {
   const rows = filteredRows();
   if ($("#elementCount")) $("#elementCount").textContent = `${rows.length} 个可点击元素`;
   const phone = $("#phone");
-  if (phone) phone.classList.toggle("hide-elements", !$("#showElements").checked);
+  const showElements = !!$("#showElements").checked;
+  if (phone) phone.classList.toggle("hide-elements", !showElements);
+
+  // 轮询期间数据没变就不重建覆盖层，避免悬浮高亮闪烁和点击丢失
+  const signature = JSON.stringify([
+    state.screen,
+    selectedIndex,
+    showElements,
+    selectButtonMode,
+    $("#filterInput").value,
+    $("#hideSystem").checked,
+    rows.map((row) => [
+      row.index, row.x1, row.y1, row.x2, row.y2,
+      row.text, row.desc, row.resource_id,
+    ]),
+  ]);
+  if (signature === lastPhoneSignature) return;
+  lastPhoneSignature = signature;
   renderList(rows);
   renderPhone(rows);
 }

@@ -1,7 +1,8 @@
-"""实时画面流：优先复用工作台已连接设备抓帧，本地 HTTP 输出 MJPEG。
+"""实时画面流：优先使用 scrcpy(H264) 解码帧，失败回退设备截图，本地 MJPEG 推送。
 
-帧源顺序：已连接的 u2/adb 设备 -> scrcpy(adb-scr-py) -> 简洁占位图。
-前端只看一个 /stream 地址，状态文字由状态栏显示，不画进画面（避免中文乱码）。
+scrcpy 服务端在手机上编码视频，客户端只解码最新帧；相比反复执行 screencap
+或 u2.screenshot，帧率更稳定、延迟更低。控制事件走同一条 scrcpy 通道，点击
+无需每次拉起新的 adb 进程。
 """
 
 import asyncio
@@ -13,11 +14,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from mobileauto.paths import APP_DIR
 
 STREAM_PORT = 8765
-FRAME_INTERVAL = 0.08  # 识别模式：约 12fps
-# 纯净模式（关闭按钮识别）：最高画质 + 最低延迟
-CLEAR_INTERVAL = 0.02   # 约 50fps
+FRAME_INTERVAL = 0.04  # 按钮识别模式：约 25fps
+CLEAR_INTERVAL = 0.02  # 纯净模式：约 50fps（scrcpy 只在画面变化时产生新帧）
 CLEAR_JPEG_QUALITY = 98
 DETECT_JPEG_QUALITY = 88
+SCRCPY_RETRY_SECONDS = 3.0
 
 
 def _blank_frame():
@@ -40,15 +41,21 @@ class FrameSource:
         self.port = port
         self.latest = _blank_frame()
         self.status = "等待设备"
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
+        self.frame_cond = threading.Condition(self.lock)
+        self.frame_seq = 0
         self._running = False
         self._server = None
+        self._loop = None
         self._conn = None  # 工作台已连接的 inspector conn
         self.clear_mode = False  # True=关闭识别的纯净高清低延迟模式
         self.frame_interval = FRAME_INTERVAL
         self.jpeg_quality = DETECT_JPEG_QUALITY
         self.no_device = False  # 显式断开后为 True，保持黑屏不再抓帧
         self.ever_connected = False
+        self._scrcpy_device = None
+        self._scrcpy_serial = ""
+        self._scrcpy_retry_at = 0.0
 
     def start(self):
         with self.lock:
@@ -60,24 +67,29 @@ class FrameSource:
         threading.Thread(target=self._http_loop, daemon=True).start()
 
     def stop(self):
+        self.request_close_scrcpy()
         self._running = False
         if self._server:
             self._server.shutdown()
 
     def attach_conn(self, conn):
         """由工作台注入已连接设备；断开时立即清成黑屏并停止抓帧。"""
-        with self.lock:
+        with self.frame_cond:
             self._conn = conn
             if conn is None:
                 # 只有曾经连上过才算「主动断开」，首次启动仍允许 scrcpy 兜底
                 if self.ever_connected:
                     self.no_device = True
                     self.latest = _blank_frame()
+                    self.frame_seq += 1
+                    self.frame_cond.notify_all()
                     self.status = "设备已断开"
             else:
                 self.ever_connected = True
                 self.no_device = False
-                self.status = f"画面采集中（{conn.get('mode', 'device')}）"
+                self.status = "画面采集中（正在启动 H264 视频）"
+        if conn is None:
+            self.request_close_scrcpy()
 
     def set_quality(self, clear=True):
         """切换画质模式。clear=True：关闭识别，最高清最低延迟。"""
@@ -85,7 +97,7 @@ class FrameSource:
             self.clear_mode = bool(clear)
             self.frame_interval = CLEAR_INTERVAL if self.clear_mode else FRAME_INTERVAL
             self.jpeg_quality = CLEAR_JPEG_QUALITY if self.clear_mode else DETECT_JPEG_QUALITY
-            self.status = "高清画面（低延迟）" if self.clear_mode else "画面采集中"
+            self.status = "高清画面（H264 低延迟）" if self.clear_mode else "画面采集中（H264）"
         return self.clear_mode
 
     def set_status(self, text):
@@ -101,17 +113,62 @@ class FrameSource:
                 "url": f"http://127.0.0.1:{self.port}/stream",
             }
 
+    # ---------- 控制通道（scrcpy 输入注入） ----------
+    def has_control(self):
+        dev = self._scrcpy_device
+        return bool(dev is not None and dev.is_connected)
+
+    def get_control_size(self):
+        dev = self._scrcpy_device
+        if dev is None or not dev.is_connected:
+            return None
+        try:
+            return dev.get_screen_size()
+        except Exception:
+            return None
+
+    def tap(self, x, y, timeout=2.0):
+        """通过 scrcpy 控制通道点击；未建通道时返回 False 交给兼容实现。"""
+        dev = self._scrcpy_device
+        if dev is None or not dev.is_connected:
+            return False
+        return self._run_control(dev.click, int(x), int(y), timeout=timeout)
+
+    def swipe(self, x1, y1, x2, y2, timeout=4.0):
+        """通过 scrcpy 控制通道滑动，带插帧，比 input swipe 更顺滑。"""
+        dev = self._scrcpy_device
+        if dev is None or not dev.is_connected:
+            return False
+        return self._run_control(
+            dev.swipe,
+            int(x1), int(y1), int(x2), int(y2),
+            timeout=timeout,
+        )
+
+    def _run_control(self, func, *args, timeout=2.0):
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return False
+        try:
+            future = asyncio.run_coroutine_threadsafe(func(*args), loop)
+            future.result(timeout=timeout)
+            return True
+        except Exception:
+            return False
+
+    # ---------- 抓帧循环 ----------
     def _capture_loop(self):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        self._loop = loop
         try:
             loop.run_until_complete(self._capture())
         finally:
+            self._loop = None
             loop.close()
 
     async def _capture(self):
         while self._running:
-            # 断开后保持黑屏，不再尝试任何抓帧
             with self.lock:
                 conn = self._conn
                 no_device = self.no_device
@@ -119,27 +176,102 @@ class FrameSource:
                 await asyncio.sleep(0.5)
                 continue
 
-            # 1) 优先复用工作台已连接的设备
-            if conn is not None:
-                ok = await self._grab_conn(conn)
-                if ok:
+            got_frame = False
+
+            # 1) scrcpy 设备端 H264 编码 + 客户端解码，帧新时就推送
+            if await self._ensure_scrcpy(conn):
+                got_frame = await self._grab_scrcpy_frame()
+                if not got_frame:
+                    await self._close_scrcpy()
+                    self._scrcpy_retry_at = time.monotonic() + SCRCPY_RETRY_SECONDS
+
+            # 2) scrcpy 不可用时回退到 u2 / adb 截图，保证功能不中断
+            if not got_frame and conn is not None:
+                got_frame = await self._grab_conn(conn)
+                if not got_frame:
+                    self.attach_conn(None)
                     continue
-                self.attach_conn(None)
-                continue
 
-            # 2) 退化到 scrcpy 帧流（若可用）
-            ok = await self._grab_scrcpy()
-            if ok:
-                continue
+            with self.lock:
+                interval = self.frame_interval
+            await asyncio.sleep(interval if got_frame else 0.8)
 
-            self.set_status("等待设备连接")
-            await asyncio.sleep(1.5)
-
-    async def _grab_conn(self, conn):
-        """从已连接设备抓一帧。成功返回 True，失败返回 False。"""
+    async def _ensure_scrcpy(self, conn):
+        """按需建立并复用一条 scrcpy(H264) 会话，避免每帧重新连接。"""
+        if self.no_device:
+            return False
+        dev = self._scrcpy_device
+        if dev is not None and dev.is_connected:
+            return True
+        now = time.monotonic()
+        if now < self._scrcpy_retry_at:
+            return False
+        self._scrcpy_retry_at = now + SCRCPY_RETRY_SECONDS
         try:
+            from adb_scr import AndroidDevice, adb_devices, init_lib
             from mobileauto import inspector
 
+            adb = inspector.find_adb()
+            if not adb:
+                return False
+            await init_lib(adb_path=adb)
+            serials = list(await adb_devices() or [])
+            serial = self._pick_serial(conn, serials)
+            if not serial:
+                return False
+            device = AndroidDevice(serial, "tcp" if ":" in serial else "usb")
+            if not await device.connect():
+                return False
+            self._scrcpy_device = device
+            self._scrcpy_serial = serial
+            self.set_status(
+                "高清画面（scrcpy H264）" if self.clear_mode else "画面采集中（scrcpy H264）"
+            )
+            return True
+        except Exception:
+            self.set_status("H264 不可用，使用兼容抓帧")
+            return False
+
+    @staticmethod
+    def _pick_serial(conn, serials):
+        """优先复用工作台当前设备；u2 的 7912 端口映射回 adb 的 5555。"""
+        candidates = []
+        label = str((conn or {}).get("label") or "").strip()
+        if label and label not in ("自动检测", "自动"):
+            if label.startswith("http://"):
+                label = label.split("://", 1)[1].split("/", 1)[0]
+            candidates.append(label)
+            if label.endswith(":7912"):
+                candidates.append(label.rsplit(":", 1)[0] + ":5555")
+        if len(serials) == 1:
+            candidates.append(serials[0])
+        else:
+            candidates.extend(serials)
+        for item in candidates:
+            if item in serials:
+                return item
+        if candidates and not serials:
+            return candidates[0]
+        return None
+
+    async def _grab_scrcpy_frame(self):
+        dev = self._scrcpy_device
+        if dev is None or not dev.is_connected:
+            return False
+        try:
+            with self.lock:
+                quality = self.jpeg_quality
+            jpg = await dev.get_screenshot_jpg(quality=quality)
+            if not jpg:
+                return False
+            self._set_frame(jpg)
+            return True
+        except Exception:
+            return False
+
+    async def _grab_conn(self, conn):
+        """兼容抓帧：从已连接 u2/adb 设备取一帧。成功返回 True。"""
+        try:
             if conn.get("mode") == "u2":
                 img = await asyncio.to_thread(conn["client"].screenshot, format="opencv")
             else:
@@ -163,47 +295,39 @@ class FrameSource:
                 quality = self.jpeg_quality
             ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
             if ok:
-                with self.lock:
-                    self.latest = buf.tobytes()
-                    interval = self.frame_interval
-                await asyncio.sleep(interval)
-            return True
+                self._set_frame(buf.tobytes())
+            return bool(ok)
         except Exception:
             return False
 
-    async def _grab_scrcpy(self):
-        """scrcpy 帧流兜底。"""
-        try:
-            from adb_scr import AndroidDevice, adb_devices
-        except Exception:
-            return False
-        try:
-            devices = await adb_devices()
-        except Exception:
-            return False
-        if not devices:
-            return False
-        serial = devices[0]
-        conn_type = "tcp" if ":" in serial else "usb"
-        try:
-            device = AndroidDevice(serial, conn_type)
-            self.set_status(f"画面采集中（scrcpy {serial}）")
-            while self._running:
-                with self.lock:
-                    if self._conn is not None:
-                        return True
-                with self.lock:
-                    quality = self.jpeg_quality
-                    interval = self.frame_interval
-                jpg = await device.get_screenshot_jpg(quality=quality)
-                if jpg:
-                    with self.lock:
-                        self.latest = jpg
-                await asyncio.sleep(interval)
-            return True
-        except Exception:
-            return False
+    def _set_frame(self, jpg):
+        with self.frame_cond:
+            self.latest = jpg
+            self.frame_seq += 1
+            self.frame_cond.notify_all()
 
+    async def _close_scrcpy(self):
+        dev = self._scrcpy_device
+        self._scrcpy_device = None
+        self._scrcpy_serial = ""
+        if dev is None:
+            return
+        try:
+            await dev.disconnect()
+        except Exception:
+            pass
+
+    def request_close_scrcpy(self):
+        """从任意线程请求关闭 scrcpy 会话（抓帧循环在同一事件循环上执行）。"""
+        loop = self._loop
+        if loop is None or loop.is_closed() or self._scrcpy_device is None:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(self._close_scrcpy(), loop)
+        except Exception:
+            pass
+
+    # ---------- 本地 HTTP 推流 ----------
     def _http_loop(self):
         source = self
 
@@ -224,12 +348,20 @@ class FrameSource:
                 self.send_header("Cache-Control", "no-store")
                 self.send_header("Connection", "close")
                 self.end_headers()
+                last_seq = -1
                 try:
                     while source._running:
-                        with source.lock:
+                        # 新帧到达立即推送；没有新帧时定时重发，维持浏览器连接
+                        with source.frame_cond:
+                            source.frame_cond.wait_for(
+                                lambda: source.frame_seq != last_seq or not source._running,
+                                timeout=1.0,
+                            )
+                            if not source._running:
+                                break
+                            last_seq = source.frame_seq
                             jpg = source.latest
                         if not jpg:
-                            time.sleep(0.1)
                             continue
                         head = (
                             b"--frame\r\n"
@@ -238,9 +370,6 @@ class FrameSource:
                         )
                         self.wfile.write(head + jpg + b"\r\n")
                         self.wfile.flush()
-                        with source.lock:
-                            interval = source.frame_interval
-                        time.sleep(interval)
                 except Exception:
                     pass
 
@@ -304,3 +433,19 @@ def set_quality(clear=True):
 
 def get_stream_status():
     return _stream.get_status() if _stream else {"status": "未启动", "url": ""}
+
+
+def has_control():
+    return bool(_stream and _stream.has_control())
+
+
+def get_control_size():
+    return _stream.get_control_size() if _stream else None
+
+
+def tap(x, y):
+    return bool(_stream and _stream.tap(x, y))
+
+
+def swipe(x1, y1, x2, y2):
+    return bool(_stream and _stream.swipe(x1, y1, x2, y2))

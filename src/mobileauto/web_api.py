@@ -29,6 +29,9 @@ class WorkbenchApi:
         self.device_label = ""
         self.scanning = False
         self.refreshing = False
+        self.detection_enabled = True
+        self._ui_busy = False
+        self._ui_tick = 0
         self.proc = None
         self.proc_label = ""
         self.task_key = ""
@@ -98,6 +101,16 @@ class WorkbenchApi:
 
     def _spawn(self, func, *args):
         threading.Thread(target=func, args=args, daemon=True).start()
+
+    def _effective_screen_size(self):
+        """优先用缓存分辨率，其次用 scrcpy 会话分辨率。"""
+        with self._lock:
+            size = self.screen_size
+        if size:
+            return size
+        from mobileauto import stream
+
+        return stream.get_control_size() or [1440, 3200]
 
     # ---------- 设备连接 ----------
     def set_auto_connect(self, enabled):
@@ -169,24 +182,27 @@ class WorkbenchApi:
             from mobileauto import inspector
 
             conn = inspector.connect_device(mode, address)
-            xml, rows = inspector.snapshot(conn)
             size = inspector.screen_size(conn)
             with self._lock:
                 self.conn = conn
-                self.rows = rows
+                self.rows = []
                 self.screen_size = size
                 self.device_status = f"已连接（{conn['mode']}）"
                 self.device_label = conn.get("label", "")
                 self.scanning = False
             from mobileauto import stream
 
+            # 先接上画面和控制通道，UI 层级放到后台读，设备识别更快返回
             stream.attach_conn(conn)
+            with self._lock:
+                self.refreshing = True
+            self._spawn(self._refresh_worker)
             self.auto_attempts = 0
             self._auto_delay = 2
             if conn.get("label") and conn["label"] not in ("自动检测", "自动"):
                 self.remember_address(conn["label"])
             self.log(f"设备连接成功：{conn['mode']} {conn.get('label', '')}")
-            self.log(f"读取到 {len(rows)} 个 UI 元素")
+            self.log("正在后台读取 UI 按钮…")
         except Exception as e:
             with self._lock:
                 self.scanning = False
@@ -198,23 +214,52 @@ class WorkbenchApi:
             self.log(f"设备扫描失败：{e}")
 
     def _ui_cache_loop(self):
-        """后台持续刷新 UI 层级，前端只读缓存，避免阻塞视频与交互。"""
+        """后台刷新 UI 层级；关闭按钮识别时完全不抓控件树，避免占用设备带宽。"""
         while True:
-            time.sleep(1.2)
+            time.sleep(1.6)
             with self._lock:
-                conn = self.conn
-                if conn is None:
+                if not self.detection_enabled or self.conn is None:
                     continue
+                if self._ui_busy or self.refreshing:
+                    continue
+                self._ui_busy = True
+                conn = self.conn
             try:
                 from mobileauto import inspector
 
-                xml, rows = inspector.snapshot(conn)
-                size = inspector.screen_size(conn)
+                _xml, rows = inspector.snapshot(conn)
                 with self._lock:
                     self.rows = rows
-                    self.screen_size = size
+                    self._ui_tick += 1
+                    need_size = self._ui_tick % 8 == 1
+                if need_size:
+                    from mobileauto import stream
+
+                    size = inspector.screen_size(conn) or stream.get_control_size()
+                    if size:
+                        with self._lock:
+                            self.screen_size = size
             except Exception:
                 pass
+            finally:
+                with self._lock:
+                    self._ui_busy = False
+
+    def set_detection(self, enabled=True):
+        """开关按钮识别；关闭后停止控件树采集，把带宽全部留给视频。"""
+        on = bool(enabled)
+        with self._lock:
+            self.detection_enabled = on
+            if not on:
+                self.rows = []
+            connected = self.conn is not None
+            busy = self.refreshing
+        if on and connected and not busy:
+            with self._lock:
+                self.refreshing = True
+            self._spawn(self._refresh_worker)
+        self.log("按钮识别已开启" if on else "按钮识别已关闭，画面优先")
+        return True
 
     def refresh(self):
         """手动触发一次立即刷新（后台线程执行，前端不等待）。"""
@@ -230,15 +275,16 @@ class WorkbenchApi:
 
     def _refresh_worker(self):
         try:
-            from mobileauto import inspector
+            from mobileauto import inspector, stream
 
             with self._lock:
                 conn = self.conn
-            xml, rows = inspector.snapshot(conn)
-            size = inspector.screen_size(conn)
+            _xml, rows = inspector.snapshot(conn)
+            size = inspector.screen_size(conn) or stream.get_control_size()
             with self._lock:
                 self.rows = rows
-                self.screen_size = size
+                if size:
+                    self.screen_size = size
         except Exception as e:
             self.log(f"刷新元素失败：{e}")
         finally:
@@ -262,25 +308,23 @@ class WorkbenchApi:
 
     def click_ratio(self, rx, ry):
         """按比例坐标试点击（用于录制时人工定位），不写入录制草稿。"""
-        with self._lock:
-            size = self.screen_size
-        w, h = (size or [1440, 3200])[:2]
+        w, h = self._effective_screen_size()[:2]
         x, y = int(float(rx) * w), int(float(ry) * h)
         self.log(f"试点击比例坐标：({rx}, {ry}) -> ({x}, {y})")
         return self.click_xy(x, y, record=False)
 
     def _click_worker(self, x, y, record=True):
         try:
-            from mobileauto import inspector
+            from mobileauto import inspector, stream
 
-            inspector.click_at(self.conn, x, y)
+            # scrcpy 控制通道复用已建立连接，点击几乎没有进程启动开销
+            if not stream.tap(x, y):
+                inspector.click_at(self.conn, x, y)
             from mobileauto import activity
 
             activity.log_action("click", f"坐标点击 ({x},{y})", f"{x},{y}")
             if record:
-                with self._lock:
-                    size = self.screen_size
-                w, h = (size or [1440, 3200])[:2]
+                w, h = self._effective_screen_size()[:2]
                 activity.record_step(
                     "click", f"点击 ({x},{y})", f"{x},{y}",
                     {
@@ -342,9 +386,7 @@ class WorkbenchApi:
         """手动加入一个点击步骤（含选点/框选定位），无需先开启录制。"""
         from mobileauto import activity
 
-        with self._lock:
-            size = self.screen_size
-        w, h = (size or [1440, 3200])[:2]
+        w, h = self._effective_screen_size()[:2]
         rx, ry = round(float(x) / w, 4), round(float(y) / h, 4)
         name = label or f"点击 ({int(x)},{int(y)})"
         step = activity.append_manual_step({
@@ -537,9 +579,7 @@ class WorkbenchApi:
         """按屏幕比例上下滚动：向上=从下往上划，向下=从上往下划。"""
         if self.conn is None:
             return False
-        with self._lock:
-            size = self.screen_size
-        w, h = (size or [1440, 3200])[:2]
+        w, h = self._effective_screen_size()[:2]
         direction = "up" if str(direction).lower() == "up" else "down"
         cx = int(w / 2)
         if direction == "up":
@@ -552,9 +592,11 @@ class WorkbenchApi:
 
     def _scroll_worker(self, x1, y1, x2, y2, record=True, direction="down"):
         try:
-            from mobileauto import inspector, activity
+            from mobileauto import inspector, activity, stream
 
-            inspector.swipe(self.conn, x1, y1, x2, y2)
+            # scrcpy 滑动自带插帧，比 input swipe 更顺滑
+            if not stream.swipe(x1, y1, x2, y2):
+                inspector.swipe(self.conn, x1, y1, x2, y2)
             activity.log_action("scroll", f"页面滚动 {direction}")
             if record:
                 activity.record_step(
