@@ -6,6 +6,7 @@ scrcpy 服务端在手机上编码视频，客户端只解码最新帧；相比�
 """
 
 import asyncio
+import base64
 import os
 import threading
 import time
@@ -20,6 +21,7 @@ CLEAR_JPEG_QUALITY = 98
 DETECT_JPEG_QUALITY = 88
 SCRCPY_RETRY_SECONDS = 3.0
 _scrcpy_audio_patched = False
+_scrcpy_fps_set = False
 
 
 def _patch_scrcpy_no_audio():
@@ -74,6 +76,8 @@ class FrameSource:
         self._scrcpy_device = None
         self._scrcpy_serial = ""
         self._scrcpy_retry_at = 0.0
+        self._scrcpy_connect_task = None
+        self._scrcpy_disabled = False  # 设备不兼容时彻底停用，避免反复启动服务
 
     def start(self):
         with self.lock:
@@ -105,8 +109,15 @@ class FrameSource:
             else:
                 self.ever_connected = True
                 self.no_device = False
-                self.status = "画面采集中（正在启动 H264 视频）"
+                self.status = (
+                    "画面采集中（兼容抓帧）" if self._scrcpy_disabled
+                    else "画面采集中（正在启动 H264 视频）"
+                )
         if conn is None:
+            task = self._scrcpy_connect_task
+            if task is not None:
+                task.cancel()
+                self._scrcpy_connect_task = None
             self.request_close_scrcpy()
 
     def set_quality(self, clear=True):
@@ -115,7 +126,8 @@ class FrameSource:
             self.clear_mode = bool(clear)
             self.frame_interval = CLEAR_INTERVAL if self.clear_mode else FRAME_INTERVAL
             self.jpeg_quality = CLEAR_JPEG_QUALITY if self.clear_mode else DETECT_JPEG_QUALITY
-            self.status = "高清画面（H264 低延迟）" if self.clear_mode else "画面采集中（H264）"
+            mode = "兼容抓帧" if self._scrcpy_disabled else "H264"
+            self.status = ("高清画面（" if self.clear_mode else "画面采集中（") + mode + "）"
         return self.clear_mode
 
     def set_status(self, text):
@@ -196,17 +208,20 @@ class FrameSource:
 
             got_frame = False
 
-            # 1) scrcpy 设备端 H264 编码 + 客户端解码，帧新时就推送
-            if await self._ensure_scrcpy(conn):
-                got_frame = await self._grab_scrcpy_frame()
-                dev = self._scrcpy_device
-                # 首帧可能要等十几秒；会话仍活着时保留它并用兼容截图兜底，
-                # 只有连接真的断开才重建，避免反复启动 scrcpy-server。
-                if not got_frame and (dev is None or not dev.is_connected):
-                    await self._close_scrcpy()
-                    self._scrcpy_retry_at = time.monotonic() + SCRCPY_RETRY_SECONDS * 3
+            # 1) scrcpy 连接放到后台任务，连接期间不阻塞截图，避免卡顿
+            dev = self._scrcpy_device
+            if not self._scrcpy_disabled:
+                if dev is not None and dev.is_connected:
+                    got_frame = await self._grab_scrcpy_frame()
+                    dev = self._scrcpy_device
+                    # Android 17 上内置 scrcpy-server 会直接 Aborted；一旦会话断掉
+                    # 就永久停用 H264，只走兼容截图，不再反复启动服务。
+                    if not got_frame and (dev is None or not dev.is_connected):
+                        self._disable_scrcpy()
+                else:
+                    self._maybe_start_scrcpy(conn)
 
-            # 2) scrcpy 不可用时回退到 u2 / adb 截图，保证功能不中断
+            # 2) 兼容抓帧：scrcpy 未就绪、不可用时立即顶上
             if not got_frame and conn is not None:
                 got_frame = await self._grab_conn(conn)
                 if not got_frame:
@@ -215,20 +230,39 @@ class FrameSource:
 
             with self.lock:
                 interval = self.frame_interval
-            await asyncio.sleep(interval if got_frame else 0.8)
+            await asyncio.sleep(interval if got_frame else (0.02 if conn else 0.8))
 
-    async def _ensure_scrcpy(self, conn):
-        """按需建立并复用一条 scrcpy(H264) 会话，避免每帧重新连接。"""
-        if self.no_device:
-            return False
-        dev = self._scrcpy_device
-        if dev is not None and dev.is_connected:
-            return True
+    def _maybe_start_scrcpy(self, conn):
+        """在抓帧后台任务里异步尝试 H264，不占用当前帧的采集时间。"""
+        if self._scrcpy_disabled or self.no_device or self._scrcpy_connect_task is not None:
+            return
         now = time.monotonic()
         if now < self._scrcpy_retry_at:
-            return False
-        self._scrcpy_retry_at = now + SCRCPY_RETRY_SECONDS * 3
+            return
+        self._scrcpy_retry_at = now + SCRCPY_RETRY_SECONDS
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        self._scrcpy_connect_task = loop.create_task(self._ensure_scrcpy(conn))
+
+    def _disable_scrcpy(self):
+        """标记 H264 不兼容，停止后续重连，永久回到快速兼容抓帧。"""
+        if self._scrcpy_disabled:
+            return
+        self._scrcpy_disabled = True
+        self._scrcpy_retry_at = float("inf")
+        self.set_status("画面采集中（H264 不兼容，兼容抓帧）")
+        self.request_close_scrcpy()
+
+    async def _ensure_scrcpy(self, conn):
+        """后台建立一条 scrcpy(H264) 会话；失败即永久停用，不阻塞抓帧。"""
+        global _scrcpy_fps_set
         try:
+            if self.no_device or self._scrcpy_disabled:
+                return False
+            dev = self._scrcpy_device
+            if dev is not None and dev.is_connected:
+                return True
             from adb_scr import (
                 AndroidDevice, ConnectionOptions, adb_devices, init_lib, set_screen_record_fps,
             )
@@ -237,12 +271,30 @@ class FrameSource:
             _patch_scrcpy_no_audio()
             adb = inspector.find_adb()
             if not adb:
+                self._disable_scrcpy()
+                return False
+            # 当前内置 scrcpy-server 在 Android 16/17 的 DisplaySizeMonitor 上会
+            # 抛 AbstractMethodError 并直接 Aborted，提前识别并跳过，避免反复启动。
+            import subprocess
+            api = await asyncio.to_thread(
+                lambda: subprocess.run(
+                    [adb, "shell", "getprop", "ro.build.version.sdk"],
+                    capture_output=True,
+                    timeout=5,
+                )
+            )
+            sdk = int("".join(c for c in api.stdout.decode("ascii", "ignore") if c.isdigit()) or 0)
+            if sdk >= 36:
+                self._disable_scrcpy()
                 return False
             await init_lib(adb_path=adb)
-            set_screen_record_fps(60)
+            if not _scrcpy_fps_set:
+                set_screen_record_fps(60)
+                _scrcpy_fps_set = True
             serials = list(await adb_devices() or [])
             serial = self._pick_serial(conn, serials)
             if not serial:
+                self._disable_scrcpy()
                 return False
             # 关闭主动 adb 探活，避免并发抓 UI 层级时误判掉线并反复重建会话
             options = ConnectionOptions(probe_interval=None, io_timeout=10.0)
@@ -250,6 +302,7 @@ class FrameSource:
                 serial, "tcp" if ":" in serial else "usb", options=options
             )
             if not await device.connect():
+                self._disable_scrcpy()
                 return False
             self._scrcpy_device = device
             self._scrcpy_serial = serial
@@ -258,8 +311,10 @@ class FrameSource:
             )
             return True
         except Exception:
-            self.set_status("H264 不可用，使用兼容抓帧")
+            self._disable_scrcpy()
             return False
+        finally:
+            self._scrcpy_connect_task = None
 
     @staticmethod
     def _pick_serial(conn, serials):
@@ -299,9 +354,24 @@ class FrameSource:
             return False
 
     async def _grab_conn(self, conn):
-        """兼容抓帧：从已连接 u2/adb 设备取一帧。成功返回 True。"""
+        """兼容抓帧：u2 直接取设备 JPEG，adb 用 screencap 后二次编码。"""
         try:
+            with self.lock:
+                quality = self.jpeg_quality
             if conn.get("mode") == "u2":
+                # u2 内部本来就是先拿 JPEG 再解码，这里直接用原始 JPEG，
+                # 省掉 PIL/cv2 解码再编码，帧率和延迟都会明显改善。
+                try:
+                    raw = await asyncio.to_thread(
+                        conn["client"].jsonrpc.takeScreenshot, 1, quality
+                    )
+                    if raw:
+                        jpg = base64.b64decode(raw)
+                        if jpg:
+                            self._set_frame(jpg)
+                            return True
+                except Exception:
+                    pass
                 img = await asyncio.to_thread(conn["client"].screenshot, format="opencv")
             else:
                 import cv2
@@ -320,8 +390,6 @@ class FrameSource:
                 return False
             import cv2
 
-            with self.lock:
-                quality = self.jpeg_quality
             ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
             if ok:
                 self._set_frame(buf.tobytes())

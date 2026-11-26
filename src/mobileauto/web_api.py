@@ -216,7 +216,7 @@ class WorkbenchApi:
     def _ui_cache_loop(self):
         """后台刷新 UI 层级；关闭按钮识别时完全不抓控件树，避免占用设备带宽。"""
         while True:
-            time.sleep(1.6)
+            time.sleep(2.5)
             with self._lock:
                 if not self.detection_enabled or self.conn is None:
                     continue
